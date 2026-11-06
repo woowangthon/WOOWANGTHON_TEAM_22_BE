@@ -46,6 +46,33 @@ class AIReply(StrictModel):
     _validate_question = field_validator("question")(validate_text)
 
 
+class DiarySource(StrictModel):
+    # 전체 요청 messages의 0-based 인덱스이며 BE message_id가 아닙니다.
+    id: int = Field(ge=0)
+    text: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
+
+    _validate_text = field_validator("text")(validate_text)
+
+
+class DiaryPage(StrictModel):
+    text: str = Field(min_length=1, max_length=MAX_HISTORY_LENGTH)
+    source_ids: list[Annotated[int, Field(ge=0)]] = Field(min_length=1)
+    imageUrl: None  # /api/diary는 이미지를 생성하지 않습니다. 필드 누락도 거절합니다.
+
+    _validate_text = field_validator("text")(validate_text)
+
+
+class AIDiaryReply(StrictModel):
+    text: str = Field(min_length=1, max_length=MAX_HISTORY_LENGTH)
+    pages: list[DiaryPage] = Field(min_length=1, max_length=6)
+    sources: list[DiarySource] = Field(min_length=1, max_length=MAX_HISTORY_MESSAGES)
+    fallback: bool
+    requires_confirmation: bool
+    mock: bool
+
+    _validate_text = field_validator("text")(validate_text)
+
+
 class Reply(StrictModel):
     message_id: str
     role: Literal["assistant"] = "assistant"
