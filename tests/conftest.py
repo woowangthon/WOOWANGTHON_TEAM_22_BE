@@ -17,12 +17,15 @@ def anyio_backend():
 class FakeAI:
     def __init__(self):
         self.requests = []
+        self.paths = []
         self.outcomes = []
 
     async def __call__(self, request):
         assert request.method == "POST"
-        assert str(request.url) == "http://127.0.0.1:8002/api/chat"
+        assert request.url.path in {"/api/chat", "/api/diary"}
+        assert str(request.url).startswith("http://127.0.0.1:8002/api/")
         self.requests.append(json.loads(request.content))
+        self.paths.append(request.url.path)
         if self.outcomes:
             outcome = self.outcomes.pop(0)
             if isinstance(outcome, Exception):
@@ -30,6 +33,17 @@ class FakeAI:
             if callable(outcome):
                 return await outcome(request)
             return outcome
+        if request.url.path == "/api/diary":
+            sources = [{"id": index, "text": item["text"]}
+                       for index, item in enumerate(self.requests[-1]["messages"])
+                       if item["role"] == "child"]
+            text = "\n".join(source["text"] for source in sources)
+            return httpx.Response(200, json={
+                "text": text, "sources": sources,
+                "pages": [{"text": text, "source_ids": [source["id"] for source in sources],
+                           "imageUrl": None}],
+                "fallback": True, "requires_confirmation": True, "mock": True,
+            })
         return httpx.Response(200, json={
             "question": f"가상 질문 {len(self.requests)}", "finished": False,
             "mock": True, "fallback": False,

@@ -32,7 +32,8 @@ async def test_start_two_round_trips_full_history_and_replay(api_factory):
     async with api_factory() as (client, service, ai):
         first = await start(client)
         assert first.status_code == 201
-        assert set(first.json()) == {"session_id", "reply", "finished", "mock", "fallback"}
+        assert set(first.json()) == {"session_id", "history_revision", "reply", "finished", "mock", "fallback"}
+        assert first.json()["history_revision"] == 0
         session_id = first.json()["session_id"]
         replay = await start(client)
         assert replay.status_code == 201 and replay.json() == first.json()
@@ -40,6 +41,8 @@ async def test_start_two_round_trips_full_history_and_replay(api_factory):
         turn1 = await send(client, session_id, text="  가상 이야기\n")
         turn2 = await send(client, session_id, "turn-2", "가상 다음 이야기")
         assert turn1.status_code == turn2.status_code == 200
+        assert turn1.json()["history_revision"] == 1
+        assert turn2.json()["history_revision"] == 2
         duplicate = await send(client, session_id, text="  가상 이야기\n")
         assert duplicate.json() == turn1.json()
         assert len(ai.requests) == 3

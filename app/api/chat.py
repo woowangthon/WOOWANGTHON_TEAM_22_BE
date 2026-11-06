@@ -3,7 +3,8 @@ from typing import Annotated
 from fastapi import APIRouter, Header, Request
 
 from app.schemas import (
-    MessageRequest, MessageResponse, RequestKey, SessionResponse, StartSessionRequest,
+    DiaryDraftRequest, DiaryDraftResponse, MessageRequest, MessageResponse,
+    RequestKey, SessionResponse, StartSessionRequest,
 )
 
 router = APIRouter(prefix="/api/chat-sessions", tags=["chat (잠정 계약)"])
@@ -20,3 +21,8 @@ async def start_session(
 @router.post("/{session_id}/messages", response_model=MessageResponse)
 async def send_message(session_id: str, body: MessageRequest, request: Request):
     return await request.app.state.chat_service.send(session_id, body)
+
+
+@router.post("/{session_id}/diary-draft", response_model=DiaryDraftResponse)
+async def create_diary_draft(session_id: str, body: DiaryDraftRequest, request: Request):
+    return await request.app.state.chat_service.diary_draft(session_id, body)

@@ -32,6 +32,11 @@ class MessageRequest(StrictModel):
     _validate_text = field_validator("text")(validate_text)
 
 
+class DiaryDraftRequest(StrictModel):
+    client_request_id: RequestKey
+    history_revision: int = Field(ge=0)
+
+
 class AIMessage(StrictModel):
     role: Literal["child", "assistant"]
     text: str
@@ -81,6 +86,7 @@ class Reply(StrictModel):
 
 class SessionResponse(StrictModel):
     session_id: str
+    history_revision: int = Field(ge=0)
     reply: Reply
     finished: bool
     mock: bool
@@ -89,3 +95,21 @@ class SessionResponse(StrictModel):
 
 class MessageResponse(SessionResponse):
     client_message_id: str
+
+
+class DiaryDraft(StrictModel):
+    draft_id: str
+    status: Literal["draft"] = "draft"
+    text: str
+    pages: list[DiaryPage]
+    sources: list[DiarySource]
+    fallback: bool
+    requires_confirmation: Literal[True] = True
+    mock: bool
+
+
+class DiaryDraftResponse(StrictModel):
+    session_id: str
+    client_request_id: str
+    history_revision: int
+    draft: DiaryDraft

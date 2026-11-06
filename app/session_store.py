@@ -4,7 +4,7 @@ from hashlib import sha256
 from app.errors import AppError
 from app.schemas import (
     AIMessage, MAX_AI_REPLY_LENGTH, MAX_HISTORY_LENGTH, MAX_HISTORY_MESSAGES,
-    MessageResponse, SessionResponse,
+    DiaryDraftResponse, MessageResponse, SessionResponse,
 )
 
 
@@ -12,7 +12,7 @@ from app.schemas import (
 class RequestRecord:
     fingerprint: str
     pending: bool = True
-    result: SessionResponse | None = None
+    result: SessionResponse | DiaryDraftResponse | None = None
     error: AppError | None = None
 
 
@@ -20,6 +20,8 @@ class RequestRecord:
 class Session:
     messages: list[AIMessage] = field(default_factory=list)
     requests: dict[str, RequestRecord] = field(default_factory=dict)
+    diary_requests: dict[str, RequestRecord] = field(default_factory=dict)
+    history_revision: int = 0
     busy: RequestRecord | None = None
 
 
@@ -63,13 +65,32 @@ class SessionStore:
         if previous is not None:
             return session, previous
         if session.busy is not None:
-            raise AppError(409, "SESSION_BUSY", "이 대화의 이전 답변을 기다려 주세요.", True)
+            raise AppError(409, "SESSION_BUSY", "이 대화의 이전 요청을 기다려 주세요.", True)
         if (len(session.messages) + 2 > MAX_HISTORY_MESSAGES
                 or sum(len(item.text) for item in session.messages)
                 + len(text) + MAX_AI_REPLY_LENGTH > MAX_HISTORY_LENGTH):
             raise AppError(422, "CONVERSATION_LIMIT_REACHED", "대화 이력 한도에 도달했어요.")
         record = RequestRecord(fingerprint)
         session.requests[key] = record
+        session.busy = record
+        return session, record
+
+    def reserve_diary(self, session_id: str, key: str, history_revision: int):
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise AppError(404, "SESSION_NOT_FOUND", "대화 세션을 찾지 못했어요.")
+        fingerprint = str(history_revision)
+        previous = self._existing(session.diary_requests, key, fingerprint)
+        if previous is not None:
+            return session, previous
+        if session.busy is not None:
+            raise AppError(409, "SESSION_BUSY", "이 대화의 이전 요청을 기다려 주세요.", True)
+        if session.history_revision != history_revision:
+            raise AppError(409, "HISTORY_REVISION_CONFLICT", "대화 버전이 달라요. 최신 대화를 확인해 주세요.")
+        if not any(item.role == "child" for item in session.messages):
+            raise AppError(422, "NO_CHILD_MESSAGES", "먼저 오늘 있었던 일을 이야기해 주세요.")
+        record = RequestRecord(fingerprint)
+        session.diary_requests[key] = record
         session.busy = record
         return session, record
 
@@ -91,6 +112,16 @@ class SessionStore:
             AIMessage(role="child", text=text),
             AIMessage(role="assistant", text=result.reply.text),
         ])
+        session.history_revision += 1
+        record.result = result
+        record.pending = False
+        session.busy = None
+
+    @staticmethod
+    def complete_diary(session: Session, record: RequestRecord, result: DiaryDraftResponse):
+        if session.busy is not record or not record.pending:
+            raise RuntimeError("유효하지 않은 초안 예약입니다.")
+        # 초안은 재전송용 캐시에만 둡니다. 확정 대화/버전과 사용자 확인 상태는 바꾸지 않습니다.
         record.result = result
         record.pending = False
         session.busy = None
