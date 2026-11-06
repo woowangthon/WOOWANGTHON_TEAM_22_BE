@@ -28,22 +28,31 @@ PowerShell 실행 정책 때문에 활성화가 막혀도 가상환경의 Python
 ```
 
 패키지 설치도 `.\.venv\Scripts\python.exe -m pip install <패키지명>`처럼 가상환경의 Python을 통해 실행합니다.
-현재는 애플리케이션 코드와 의존성 명세가 없어 서버 실행과 테스트 명령은 추후 추가합니다.
+
+### 의존성 설치와 서버 실행
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m pytest -q
+$env:AI_BASE_URL = 'http://127.0.0.1:8002'
+$env:ALLOWED_ORIGINS = 'http://127.0.0.1:5500,http://localhost:5500'
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
+```
+
+`GET http://127.0.0.1:8000/health`는 `{"status":"ok"}`를 반환합니다.
+AI 서버 상태를 검사하는 경로는 아닙니다. API 문서는 `/docs`에서 확인합니다.
+`.env.example`은 설정 참고용이며 `.env`를 자동 로딩하지 않습니다. PowerShell 환경변수를 사용하세요.
+타임아웃 기본값은 연결 3초, 읽기 130초, 쓰기 10초, 풀 대기 3초, 전체 AI 대기 135초입니다.
+각 이름은 `.env.example`에 있으며 0·음수·무한대는 허용하지 않습니다.
+개발 CORS는 지정한 origin만 허용하고 자격증명 전송을 허용하지 않습니다.
+`file://` 대신 정적 서버를 사용하고 FE 주소와 `ALLOWED_ORIGINS`를 맞추세요.
 
 ### Git 작업 흐름
 
 변경 전에 `git status`와 현재 브랜치를 확인하고 기존 작업을 보존합니다.
-깨끗한 작업 트리에서 다음과 같이 최신 `main`을 기준으로 목적별 작업 브랜치를 만듭니다.
-
-```powershell
-git switch main
-git fetch origin main
-git merge --ff-only origin/main
-git switch -c feat/작업명
-```
-
-초기 환경 설정 브랜치는 `feat/be-bootstrap`입니다. 작업과 검증을 완료한 뒤 변경 목적 단위로 커밋하고,
-작업 브랜치를 푸시하여 PR을 통해 `main`에 반영합니다. 커밋 전에 `git diff --cached`로 스테이징 내용을 확인합니다.
+이번 최소 BE 구현은 기존 `feat/be-bootstrap`에서 계속 작업합니다. 새 브랜치·푸시·PR 생성·main 병합은 수행하지 않습니다.
+작업과 검증을 완료한 뒤 변경 목적 단위로 커밋합니다. 커밋 전에 `git diff --cached`로 스테이징 내용을 확인합니다.
 커밋 메시지는 `chore: BE 초기 개발 환경 설정`처럼 적절한 유형과 구체적인 한국어 설명으로 작성합니다.
 
 실제 환경변수 파일(`.env`, `.env.*`), 비밀키와 `.venv`는 Git에서 제외합니다.
