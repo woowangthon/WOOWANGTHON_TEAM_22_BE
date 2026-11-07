@@ -231,6 +231,50 @@ SQL만으로 필수 원본 실존·대화/출처 일관성·최종 확인을 보
 SQL 파일과 이력 기록의 트랜잭션은 Supabase CLI에 맡깁니다. 버킷 준비까지 하나의 원자적 배포는 아닙니다.
 후속 단계 실패 시 저장 기능을 열지 않습니다. 실제 Supabase의 SQL 적용·RLS·Storage 동작은 미검증입니다.
 
+### 로컬 Supabase Auth·RLS 조회 검증
+
+[scripts/verify_supabase_rls.py](scripts/verify_supabase_rls.py)는 기존 BE `.venv`의 HTTPX를 재사용합니다.
+**실제 로그인은 사용자가 직접 실행합니다.** 가상 테스트 회원 A/B만 사용하고 실제 아동 데이터는 사용하지 않습니다.
+필수 환경변수는 `SUPABASE_PUBLISHABLE_KEY`이며 `sb_publishable_` 형식만 허용합니다.
+선택 환경변수 `SUPABASE_URL`은 기본 주소 `https://nnbmxtiouvsuszretahg.supabase.co`와 정확히 같아야 합니다.
+Secret/service_role/기존 JWT 형식 키는 거절합니다. `.env` 자동 로딩은 없습니다.
+
+BE 루트의 대화형 PowerShell에서 실행합니다. 아래 명령은 키 값을 명령 이력에 직접 적지 않고 입력받습니다.
+
+```powershell
+$env:SUPABASE_PUBLISHABLE_KEY = Read-Host 'today-and-near Publishable key'
+.\.venv\Scripts\python.exe -m scripts.verify_supabase_rls
+$LASTEXITCODE
+Remove-Item Env:SUPABASE_PUBLISHABLE_KEY
+```
+
+순서대로 A 이메일 → A 비밀번호 → B 이메일 → B 비밀번호를 입력합니다. 비밀번호는 `getpass`로 숨기며
+숨김 입력이 불가능한 터미널/파이프에서는 중단합니다. 비밀번호를 환경변수·명령 인수·파일에 넣지 마세요.
+비밀번호·Access/Refresh Token·응답 본문은 출력/파일 저장하지 않습니다. 자동 재시도·토큰 갱신도 없습니다.
+
+도구는 비익명 로그인과 Auth 서버의 회원 정보, A/B의 서로 다른 ID·토큰을 확인한 뒤 회원별 JWT로
+`diaries`, `diary_messages`, `diary_assets`의 `id,user_id`만 최대 100행씩 조회합니다.
+소유자 필터 없는 본인 표본과 상대 회원 필터 조회를 양방향 검사하고, JWT 없는 요청의 DB 권한 오류
+(`401/403` 및 `42501`)도 확인합니다. 빈 배열이나 게이트웨이 인증 오류를 명시적 DB 거절로 표시하지 않습니다.
+헤더는 [Supabase API 키 안내](https://supabase.com/docs/guides/getting-started/api-keys)에 따라
+`apikey`에 Publishable key, `Authorization`에 회원 JWT를 각각 전달합니다.
+
+종료 코드: `0`은 세 테이블 모두 A/B 본인 데이터와 표본 교차 조회 확인, `1`은 실패/오류,
+`2`는 로그인·조회·미인증 거절은 확인했으나 **본인 데이터 부족으로 회원 간 격리는 미완료**입니다.
+표본 검증이며 전체 행·모든 RLS 정책의 검증 완료를 뜻하지 않습니다.
+
+향후 별도 승인된 절차로 가상 일기 A/B가 준비되면 알려진 UUID를 지정해 본인 조회와 상대 ID 조회도 확인할 수 있습니다.
+`check_fixture`를 다른 가상 데이터의 양방향 조회 검사로 확장할 수 있으며 이 도구는 fixture를 생성하지 않습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.verify_supabase_rls --diary-a-id '<가상 A 일기 UUID>' --diary-b-id '<가상 B 일기 UUID>'
+.\.venv\Scripts\python.exe -m pytest -q tests/test_verify_supabase_rls.py
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+DB INSERT/UPDATE/DELETE와 Storage API 호출은 수행하지 않습니다. 쓰기 거절·Storage 권한·Auth 익명 회원·
+만료/변조 토큰 검증은 후속 작업입니다. 모의 테스트 통과와 실제 회원 로그인/RLS 검증은 구분합니다.
+
 ### Git 작업 흐름
 
 변경 전에 `git status`와 현재 브랜치를 확인하고 기존 작업을 보존합니다.
