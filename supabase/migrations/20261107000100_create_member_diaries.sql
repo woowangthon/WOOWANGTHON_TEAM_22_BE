@@ -104,6 +104,7 @@ create table public.diary_assets (
     ),
     constraint diary_assets_bucket_ck check (bucket_id = 'diary-private'),
     constraint diary_assets_mime_ck check (mime_type in ('image/jpeg', 'image/png')),
+    -- 1바이트부터 허용하며 1 MiB 미만도 저장합니다. 실제 JPEG/PNG 검증은 향후 BE 업로드가 맡습니다.
     constraint diary_assets_size_ck check (byte_size between 1 and 10485760),
     constraint diary_assets_dimensions_ck check (width > 0 and height > 0),
     constraint diary_assets_sha256_ck check (sha256 ~ '^[0-9a-f]{64}$'),
