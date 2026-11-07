@@ -195,9 +195,10 @@ async def test_draft_deadline_or_cancellation_caches_unknown_and_releases_busy(a
 
         ai.outcomes.append(blocked)
         if cancel:
-            task = asyncio.create_task(service.diary_draft(session_id, DiaryDraftRequest(
-                client_request_id="draft-1", history_revision=1,
-            )))
+            task = asyncio.create_task(service.diary_draft(
+                service.store.sessions[session_id].owner_id, session_id,
+                DiaryDraftRequest(client_request_id="draft-1", history_revision=1),
+            ))
             await asyncio.wait_for(entered.wait(), 2)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):

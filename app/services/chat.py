@@ -1,5 +1,5 @@
 import asyncio
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from app.clients.ai import AIClient, outcome_unknown
 from app.errors import AppError
@@ -19,8 +19,8 @@ class ChatService:
         self.store = store
         self.ai = ai
 
-    async def start(self, key: str) -> SessionResponse:
-        record = self.store.reserve_start(key)
+    async def start(self, owner_id: UUID, key: str) -> SessionResponse:
+        record = self.store.reserve_start(owner_id, key)
         if record.result is not None:
             return record.result
         try:
@@ -31,7 +31,7 @@ class ChatService:
                 reply=Reply(message_id=f"msg_{uuid4().hex}", text=ai_reply.question),
                 **ai_reply.model_dump(exclude={"question"}),
             )
-            self.store.complete_start(key, record, result)
+            self.store.complete_start(owner_id, key, record, result)
             return result
         except asyncio.CancelledError:
             self.store.fail(record, outcome_unknown())
@@ -44,13 +44,13 @@ class ChatService:
             self.store.fail(record, failure)
             raise failure from error
 
-    async def send(self, session_id: str, body: MessageRequest) -> MessageResponse:
+    async def send(self, owner_id: UUID, session_id: str, body: MessageRequest) -> MessageResponse:
         session, record = self.store.reserve_message(
-            session_id, body.client_message_id, body.text,
+            owner_id, session_id, body.client_message_id, body.text,
         )
         if record.result is not None:
             return record.result
-        # AI에는 확정 이력의 스냅샷과 새 발언만 전송합니다.
+        # 확정 이력 스냅샷과 새 발언 전달
         candidate = [*session.messages, AIMessage(role="child", text=body.text)]
         try:
             ai_reply = await self.ai.chat(candidate)
@@ -73,13 +73,14 @@ class ChatService:
             self.store.fail(record, failure, session)
             raise failure from error
 
-    async def diary_draft(self, session_id: str, body: DiaryDraftRequest) -> DiaryDraftResponse:
+    async def diary_draft(self, owner_id: UUID, session_id: str,
+                          body: DiaryDraftRequest) -> DiaryDraftResponse:
         session, record = self.store.reserve_diary(
-            session_id, body.client_request_id, body.history_revision,
+            owner_id, session_id, body.client_request_id, body.history_revision,
         )
         if record.result is not None:
             return record.result
-        # 예약부터 완료까지 같은 세션의 새 대화/초안은 차단됩니다.
+        # 초안 완료까지 같은 세션의 대화·초안 중복 요청 차단
         snapshot = list(session.messages)
         try:
             ai_reply = await self.ai.diary(snapshot)

@@ -4,7 +4,7 @@
 
 FE → BE → 기존 AI HTTP 서버로 이어지는 최소 텍스트 대화·일기 초안 서버입니다.
 아래 FE·BE API 계약은 **팀 합의 전 잠정 계약**입니다.
-Supabase 비익명 회원 토큰 인증 지원. 실제 아동 데이터 사용 금지.
+Supabase 비익명 회원 토큰 인증과 회원별 세션·초안 소유권 검사 지원. 실제 아동 데이터 사용 금지.
 DB·그림 저장·최종 일기 확인/저장·이미지 생성은 미구현.
 
 회원별 그림일기 SQL 001·002는 사용자 확인 기준 적용 완료. 현재 API의 DB 연결은 미구현.
@@ -86,6 +86,7 @@ AI 서버 상태를 검사하는 경로는 아닙니다. API 문서는 `/docs`�
 공개키 존재는 현재 발급 토큰 전부의 알고리즘을 확정하는 근거는 아니므로 Dashboard의 활성 키도 수동 확인.
 JWKS 로컬 검증은 서명·고정 issuer·audience·만료·role 검증과 키 교체/캐시 관리가 필요.
 이번 선택은 [공식 Auth `/user` 검증](https://supabase.com/docs/guides/auth/jwts#verifying-with-a-shared-secret-signing-key).
+[공식 getUser 안내](https://supabase.com/docs/reference/javascript/auth-getuser)의 서버 재검증·신뢰 가능한 회원 조회와 같은 경로.
 매 요청마다 고정된 `SUPABASE_URL/auth/v1/user`에 Publishable key와 회원 Bearer 토큰 전달.
 Auth 서버에 서명·토큰 유효성·만료 검증 위임 후, 200 응답의 UUID와
 `is_anonymous=false`, `role=authenticated`, `aud=authenticated` 모두 확인.
@@ -98,15 +99,54 @@ JWT 자체 구현·서명 없는 디코딩·관리자 키·인증 성공 캐시�
 | --- | --- | --- |
 | 401 | AUTHENTICATION_FAILED | 토큰 없음·형식 오류·Auth 400/401/403(무효·만료 포함), false, `WWW-Authenticate: Bearer` |
 | 403 | ACCESS_DENIED | 검증된 회원의 익명 여부·역할·audience 조건 불충족, false |
+| 404 | SESSION_NOT_FOUND | 없는 세션·타 회원 세션 모두 같은 코드/메시지, false |
 | 503 | AUTH_UNAVAILABLE | 연결 실패·timeout·Auth 429/5xx, true |
 | 502 | AUTH_INVALID_RESPONSE | 잘못된 JSON/UUID·예상 밖 상태·redirect, false |
 | 503 | AUTH_NOT_CONFIGURED | Publishable key 설정 누락, false |
 
 공통 `{error:{code,message,retryable},request_id}`와 no-store 유지. 공급자 오류/토큰 원문 반환 금지.
+기존 세션 오류 코드는 유지하고 메시지만 `세션 없음`, `요청 처리 중`, `요청 ID 충돌` 등으로 축약.
 FE는 무효·만료 토큰을 새로 로그인/갱신한 뒤 재요청. BE는 Refresh Token 취급 없음.
 Auth 연결 오류는 인증/세션 예약 이전 실패이므로 같은 요청 ID로 명시적 재시도 가능.
 
+### 실제 Supabase Auth 수동 검증
+
+자동 테스트는 MockTransport의 가짜 Auth 응답·가짜 토큰만 사용. 실제 토큰 서명·만료 판정은
+Supabase에 위임하므로 아래 실연동 확인 필요. 이번 작업에서 실제 회원 로그인·모델 호출은 미실행.
+
+1. Dashboard에서 대상 프로젝트·활성 JWT signing key·Publishable key 확인. 현재 공개 JWKS는 ES256.
+   기존 RLS 검증 도구의 HTTPS 주소·Publishable key 제한·`/user` 재검증 방식을 재사용한 설계.
+   대화형 Auth/RLS 도구 자체는 DB 조회도 포함하므로 BE API 인증만 확인할 때는 실행 불필요.
+2. 기존 AI의 `/api/status`에서 `mode=mock` 확인 후 위 실행 명령으로 BE 실행. 실모델 모드면 중단.
+   이 절차에서는 `verify_mock_diary` 사용 금지: 해당 스크립트의 Auth는 가짜 서버.
+3. 별도 브라우저 프로필 A/B로 준비된 비익명 테스트 회원 로그인.
+   기존 Supabase 로그인 흐름에서 얻은 Access Token만 각 로컬 `/docs`의 **Authorize**에 입력.
+   비밀번호·토큰을 채팅·소스·명령 인수·파일·공유 로그에 기록하지 말고 작업 후 Authorize 해제.
+4. A/B 각각 같은 `Idempotency-Key`로 `{}` 전송: 서로 다른 세션과 201 확인.
+   각각 발언 2회 후 revision=2 초안 요청. 동일한 메시지/초안 ID 재전송 결과·revision 보존 확인.
+5. A로 B 세션의 메시지/초안, B로 A 세션의 기존 캐시 ID 요청: 모두 404 `SESSION_NOT_FOUND` 확인.
+   소유 회원으로 다시 요청해 이력·초안 보존 확인.
+6. Authorize 해제·변조 토큰·갱신하지 않은 실제 만료 토큰·다른 프로젝트 토큰으로 401 확인.
+   익명 회원 토큰은 403 확인. Auth 연결 차단 환경에서는 503 `AUTH_UNAVAILABLE`,
+   공개 health는 200 확인. 오류 요청 동안 AI mock 호출과 이력 변경 없음 확인.
+7. BE 재시작 후 기존 세션은 404. 이 절차는 DB/RLS/Storage 검증 결과와 구분.
+
+### 영구 저장·배포 후속 작업
+
+단일 프로세스 메모리 구현 유지. 재시작·reload 시 세션/이력/초안/중복 기록 소실, TTL·quota 없음.
+다중 worker·다중 인스턴스 전환 전 공유 DB에 회원 UUID/소유권·확정 이력·revision·요청 결과 저장 필요.
+회원별 시작 키와 세션별 요청 ID의 고유 제약, 예약/완료 트랜잭션·락·실패 복구·보존/삭제 정책 필요.
+배포에서는 HTTPS·정확한 FE origin·Publishable key 환경 설정·Auth 리전/지연/호출 제한·로그 마스킹 확인.
+현재 일반 회원 DB 쓰기 차단 정책에 맞춘 최소 권한 저장 경로도 별도 설계 대상. 관리자 키 추가 없음.
+
 ### 대화·초안 계약
+
+세션 생성 시 Auth 서버가 확인한 회원 UUID를 서버 내부 `owner_id`로 기록.
+시작 키는 `(회원 UUID, Idempotency-Key)`로 분리. 다른 회원의 동일 키는 별도 세션 생성.
+메시지·초안은 소유권 확인 후에만 중복 기록·busy·대화 버전 검사 수행.
+기존 성공 캐시·실패 캐시·처리 중 요청도 타 회원에게는 모두 `404 SESSION_NOT_FOUND`.
+인증 실패·타인 접근 시 AI 호출·세션/이력/버전/초안/요청 기록 변경 없음.
+세션별 메시지/초안 ID namespace와 같은 회원 재전송 복구 규칙 유지.
 
 | API | 기능 |
 | --- | --- |
@@ -140,6 +180,7 @@ TTL·영구 저장·자동 정리는 없으며 짧은 로컬 개발 검증용입
 
 ```http
 POST /api/chat-sessions/{session_id}/diary-draft
+Authorization: Bearer <Supabase access token>
 Content-Type: application/json
 
 {"client_request_id":"draft-demo-001","history_revision":1}
@@ -179,7 +220,9 @@ ASGI lifespan은 테스트에서 명시적으로 실행합니다. AnyIO pytest �
 문자열·Unicode·이력 한도, AI 오류 HTTP·잘못된 응답·통신 실패·timeout·취소·기존 이력 보존.
 일기 초안의 전체 확정 이력/버전, 아이 발언 유무, 출처 인덱스/원문, 엄격한 응답 검사,
 중복/대화와의 양방향 충돌, 실패 후 기존 초안·대화 보존도 검사합니다.
-최종 실행 결과: **179 passed**, 기존 70개 회귀 포함(일기 관련 109개 추가), 경고 없음.
+회원 A/B 모의 Auth 서버·가짜 토큰으로 회원별 시작/메시지/초안 분리,
+타 회원의 신규/캐시/실패/처리 중 세션 접근 차단, 인증 실패 시 이력 보존 검증 추가.
+2026-11-07 BE `.venv` 전체 결과: **345 passed**, 기존 RLS 도구 88개/BE 회귀 179개 포함.
 
 ### 기존 AI mock 서버와 실제 HTTP 검증
 
@@ -212,7 +255,7 @@ $env:PORT = '8002'
 FE 연결은 FE 담당자의 API 수정 후 별도로 확인합니다.
 
 미검증/팀 합의 사항: 제품 FE 연결, 실제 모델의 품질·운영 timeout, 종료/재생성 UX,
-과거 버전 초안 표시·최종 일기 확인/수정/저장 API, 인증·소유권·TTL·DB 정책.
+과거 버전 초안 표시·최종 일기 확인/수정/저장 API, TTL·영속 DB 저장 정책.
 현재는 finished 여부와 무관하게 아이 발언이 있으면 명시적 초안 요청을 허용하고,
 새 ID로 같은 버전을 명시적으로 재생성할 수 있습니다. 이 구현 정책은 팀 승인 전 잠정안입니다.
 
@@ -222,6 +265,7 @@ FE 연결은 FE 담당자의 API 수정 후 별도로 확인합니다.
 `errors.py`는 공통 오류를 담당합니다. `api/chat.py`는 요청 처리,
 `services/chat.py`는 후보 이력/AI 호출/상태 전이, `session_store.py`는 메모리 예약/저장,
 `clients/ai.py`는 기존 AI HTTP와 응답 검증을 담당합니다.
+`auth.py`는 Bearer 의존성, `clients/auth.py`는 Supabase Auth 검증과 회원 UUID 반환 담당.
 
 ### Supabase DB·Storage 스키마와 정책
 
@@ -245,7 +289,7 @@ SQL 주석의 `docs/*.md`는 로컬 상세 문서 안내입니다. 새 clone에�
 
 DB는 `auth.uid()` 일치와 `is_anonymous='false'` 조건으로 일반 회원의 본인 조회만 허용합니다.
 일반 회원의 직접 INSERT·수정·삭제와 미인증·익명 로그인·타 회원 조회는 차단합니다.
-BE가 Supabase Auth 토큰과 세션·초안 소유권, 원문·AI 결과·확인 행위를 검증하는 저장 경로는 미구현입니다.
+Supabase Auth 인증과 메모리 세션·초안 소유권 검사 구현 완료. DB 영구 저장 경로는 미구현.
 회원 JWT를 전달하는 것만으로 DB 쓰기는 열리지 않으며 최소 권한 쓰기 경로를 별도로 설계해야 합니다.
 토큰 검증과 DB 권한 검증은 별개입니다. FE 요청 user_id를 신뢰하지 않고 검증한 회원 ID를 사용합니다.
 service_role/관리자 연결은 RLS를 우회할 수 있으므로 서버의 인증·소유권·내용 검증을 대신하지 못합니다.
