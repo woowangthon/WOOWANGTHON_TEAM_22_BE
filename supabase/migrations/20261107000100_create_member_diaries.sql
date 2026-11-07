@@ -1,5 +1,5 @@
 -- 검토용 초안: 실제 DB에 적용하지 않았습니다. 선행 검토는 docs/DIARY_DB_SCHEMA.md를 따릅니다.
-begin;
+-- 파일과 적용 이력의 원자성은 Supabase CLI에 맡기며 직접 COMMIT하지 않습니다.
 
 -- 확인된 일기 한 권을 저장하며 대화 원문과 AI 초안은 별도로 보존합니다.
 create table public.diaries (
@@ -123,22 +123,18 @@ alter table public.diaries enable row level security;
 alter table public.diary_messages enable row level security;
 alter table public.diary_assets enable row level security;
 
--- 미정인 수정/삭제는 권한과 정책 모두 열지 않습니다. 익명 공개 쓰기도 허용하지 않습니다.
+-- 회원 직접 쓰기를 막고 일기·원문·AI 결과는 향후 BE의 검증된 저장 경로로만 추가합니다.
+-- BE 저장은 미구현이며 JWT 인증·소유권·내용 검증과 최소 권한 쓰기를 별도로 설계해야 합니다.
+-- service_role/소유자는 RLS를 우회하므로 서버 검증을 대신하지 못하며 관리자 키는 서버에만 둡니다.
 revoke all privileges on table public.diaries, public.diary_messages, public.diary_assets
     from public, anon, authenticated;
-grant select, insert on table public.diaries, public.diary_messages, public.diary_assets
+grant select on table public.diaries, public.diary_messages, public.diary_assets
     to authenticated;
 
 -- 회원 ID는 JWT의 auth.uid()와 일치해야 하며 Supabase 익명 로그인도 제외합니다.
 create policy diaries_select_own on public.diaries
     for select to authenticated
     using (
-        user_id = (select auth.uid())
-        and (select auth.jwt() ->> 'is_anonymous') = 'false'
-    );
-create policy diaries_insert_own on public.diaries
-    for insert to authenticated
-    with check (
         user_id = (select auth.uid())
         and (select auth.jwt() ->> 'is_anonymous') = 'false'
     );
@@ -149,12 +145,6 @@ create policy diary_messages_select_own on public.diary_messages
         user_id = (select auth.uid())
         and (select auth.jwt() ->> 'is_anonymous') = 'false'
     );
-create policy diary_messages_insert_own on public.diary_messages
-    for insert to authenticated
-    with check (
-        user_id = (select auth.uid())
-        and (select auth.jwt() ->> 'is_anonymous') = 'false'
-    );
 
 create policy diary_assets_select_own on public.diary_assets
     for select to authenticated
@@ -162,13 +152,3 @@ create policy diary_assets_select_own on public.diary_assets
         user_id = (select auth.uid())
         and (select auth.jwt() ->> 'is_anonymous') = 'false'
     );
--- 향후 AI 만화 참조는 검증된 서버만 추가하고 일반 회원은 원본 참조만 추가합니다.
-create policy diary_assets_insert_own_original on public.diary_assets
-    for insert to authenticated
-    with check (
-        user_id = (select auth.uid())
-        and (select auth.jwt() ->> 'is_anonymous') = 'false'
-        and asset_kind = 'original_drawing'
-    );
-
-commit;
