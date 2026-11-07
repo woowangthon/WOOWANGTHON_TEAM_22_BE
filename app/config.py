@@ -20,6 +20,17 @@ class Settings(BaseModel):
     supabase_url: str = "https://nnbmxtiouvsuszretahg.supabase.co"
     supabase_publishable_key: SecretStr | None = None
     auth_request_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
+    supabase_secret_key: SecretStr | None = None
+    db_request_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
+
+    @field_validator("supabase_secret_key")
+    @classmethod
+    def validate_secret_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not re.fullmatch(
+            r"sb_secret_[A-Za-z0-9_-]+", value.get_secret_value(),
+        ):
+            raise ValueError("SUPABASE_SECRET_KEY: 서버 전용 Secret key 필요")
+        return value
 
     @field_validator("supabase_url")
     @classmethod

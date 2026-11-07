@@ -5,9 +5,9 @@
 FE → BE → 기존 AI HTTP 서버로 이어지는 최소 텍스트 대화·일기 초안 서버입니다.
 아래 FE·BE API 계약은 **팀 합의 전 잠정 계약**입니다.
 Supabase 비익명 회원 토큰 인증과 회원별 세션·초안 소유권 검사 지원. 실제 아동 데이터 사용 금지.
-DB·그림 저장·최종 일기 확인/저장·이미지 생성은 미구현.
+확정 일기·원본 대화의 DB 저장과 월별/상세 조회 구현. 그림 저장·이미지 생성·일기 수정은 미구현.
 
-회원별 그림일기 SQL 001·002는 사용자 확인 기준 적용 완료. 현재 API의 DB 연결은 미구현.
+회원별 그림일기 SQL 001·002는 사용자 확인 기준 적용 완료. 신규 저장에 필요한 SQL 003은 원격 미적용.
 스키마·보안 요약과 적용 전 확인 순서는 아래에 있습니다.
 
 ## 개발 환경
@@ -68,6 +68,8 @@ AI 서버 상태를 검사하는 경로는 아닙니다. API 문서는 `/docs`�
 | SUPABASE_URL | `https://nnbmxtiouvsuszretahg.supabase.co`, 인증정보 없는 HTTPS origin |
 | SUPABASE_PUBLISHABLE_KEY | 필수, `sb_publishable_` 형식만 허용. Secret/service_role/JWT 형식 키 금지 |
 | AUTH_REQUEST_TIMEOUT_SECONDS | 10, Auth HTTP 및 전체 요청 제한 |
+| SUPABASE_SECRET_KEY | 쓰기 전용 `sb_secret_` 키. BE 서버 환경/secret manager에만 주입, 누락 시 신규 저장 503 |
+| DB_REQUEST_TIMEOUT_SECONDS | 10, 개별 DB HTTP와 전체 요청 제한. 자동 재시도 없음 |
 
 변수 예시는 Git에서 공유하는 [.env.example](.env.example)에도 있습니다.
 개발 CORS는 지정한 origin만 허용하고 자격증명 전송을 허용하지 않습니다.
@@ -77,7 +79,7 @@ AI 서버 상태를 검사하는 경로는 아닙니다. API 문서는 `/docs`�
 
 ### API와 저장 방식
 
-세 POST API 모두 `Authorization: Bearer <Supabase access token>` 필수. `GET /health` 공개 유지.
+모든 대화·초안·확정·조회 API는 `Authorization: Bearer <Supabase access token>` 필수. `GET /health` 공개 유지.
 요청 본문·성공 응답 필드와 기존 요청 ID/버전 규칙 유지. `user_id` 등 추가 필드는 기존대로 422.
 
 ### Supabase 회원 인증
@@ -91,7 +93,7 @@ JWKS 로컬 검증은 서명·고정 issuer·audience·만료·role 검증과 �
 Auth 서버에 서명·토큰 유효성·만료 검증 위임 후, 200 응답의 UUID와
 `is_anonymous=false`, `role=authenticated`, `aud=authenticated` 모두 확인.
 최신 회원 정보 확인과 ES256/레거시 키 교체 대응, 기존 RLS 도구와 같은 검증 경로가 선택 근거.
-JWT 자체 구현·서명 없는 디코딩·관리자 키·인증 성공 캐시·자동 재시도 없음.
+인증 경로에는 JWT 자체 구현·서명 없는 디코딩·관리자 키·인증 성공 캐시·자동 재시도 없음.
 대신 매 요청의 Auth 통신 지연/장애 의존성 존재. 운영 환경은 Supabase와 가까운 리전 권장.
 설정 누락 시 health는 공개하되 보호 API는 503 `AUTH_NOT_CONFIGURED`로 차단.
 
@@ -137,7 +139,7 @@ Supabase에 위임하므로 아래 실연동 확인 필요. 이번 작업에서 
 다중 worker·다중 인스턴스 전환 전 공유 DB에 회원 UUID/소유권·확정 이력·revision·요청 결과 저장 필요.
 회원별 시작 키와 세션별 요청 ID의 고유 제약, 예약/완료 트랜잭션·락·실패 복구·보존/삭제 정책 필요.
 배포에서는 HTTPS·정확한 FE origin·Publishable key 환경 설정·Auth 리전/지연/호출 제한·로그 마스킹 확인.
-현재 일반 회원 DB 쓰기 차단 정책에 맞춘 최소 권한 저장 경로도 별도 설계 대상. 관리자 키 추가 없음.
+확정된 결과만 서버 전용 RPC로 저장. 일반 회원 직접 쓰기 차단 유지. 아래 확정 일기 계약 참고.
 
 ### 대화·초안 계약
 
@@ -154,6 +156,9 @@ Supabase에 위임하므로 아래 실연동 확인 필요. 이번 작업에서 
 | POST /api/chat-sessions | `{}`와 Idempotency-Key로 첫 질문/세션 생성 |
 | POST /api/chat-sessions/{session_id}/messages | client_message_id와 text를 보내 대화 진행 |
 | POST /api/chat-sessions/{session_id}/diary-draft | client_request_id와 history_revision으로 기존 확정 이력의 일기 초안 생성 |
+| POST /api/chat-sessions/{session_id}/diaries | 검증된 초안과 원본 대화 영구 저장, 최초/재전송 모두 200 |
+| GET /api/diaries?month=YYYY-MM | 본인 월별 일기 목록, 날짜 오름차순 |
+| GET /api/diaries/{diary_id} | 본인 일기 본문·초안·원본 대화 상세 |
 
 시작 요청은 `Idempotency-Key` 헤더와 JSON `{}`를 보내며 성공 시 201입니다.
 발언 요청은 `{"client_message_id":"turn-demo-001","text":"가상 인물과 공놀이했어."}`이고 성공 시 200입니다.
@@ -170,7 +175,7 @@ AI 주소는 HTTP(S) origin으로 지정합니다. BE는 `/api/chat`, `/api/diar
 세션 ID는 인증 수단이 아닙니다.
 
 세션과 요청 기록은 단일 프로세스 메모리에만 있습니다. **BE 재시작 시 모두 사라집니다.**
-TTL·영구 저장·자동 정리는 없으며 짧은 로컬 개발 검증용입니다.
+미확정 세션의 TTL·영구 저장·자동 정리는 없습니다. 확정 일기와 당시 대화는 별도 DB 저장 대상입니다.
 `--workers 1`을 유지하고 최초 연동 검증에서는 `--reload`를 사용하지 않습니다.
 발언은 공백뿐인 값·잘못된 Unicode를 제외한 1~2,000자이며 원문을 보존합니다.
 전체 이력은 60개/20,000자 이내이고 AI 답변 150자 여유를 확보하므로 최대 29회 왕복입니다.
@@ -222,7 +227,8 @@ ASGI lifespan은 테스트에서 명시적으로 실행합니다. AnyIO pytest �
 중복/대화와의 양방향 충돌, 실패 후 기존 초안·대화 보존도 검사합니다.
 회원 A/B 모의 Auth 서버·가짜 토큰으로 회원별 시작/메시지/초안 분리,
 타 회원의 신규/캐시/실패/처리 중 세션 접근 차단, 인증 실패 시 이력 보존 검증 추가.
-2026-11-07 BE `.venv` 전체 결과: **345 passed**, 기존 RLS 도구 88개/BE 회귀 179개 포함.
+2026-11-07 시작 회귀 기준 **345 passed** 유지. 확정 저장·조회 모의/SQL 정적 검증 60개 추가, 최종 **405 passed**.
+실제 PostgreSQL·Supabase DB/RPC·RLS 실행 검증 결과는 포함하지 않습니다.
 
 ### 기존 AI mock 서버와 실제 HTTP 검증
 
@@ -255,7 +261,7 @@ $env:PORT = '8002'
 FE 연결은 FE 담당자의 API 수정 후 별도로 확인합니다.
 
 미검증/팀 합의 사항: 제품 FE 연결, 실제 모델의 품질·운영 timeout, 종료/재생성 UX,
-과거 버전 초안 표시·최종 일기 확인/수정/저장 API, TTL·영속 DB 저장 정책.
+과거 버전 초안 표시·일기 수정 UX, 세션 TTL·보존/삭제 정책. 확정 저장·조회 계약은 아래 제안안 참고.
 현재는 finished 여부와 무관하게 아이 발언이 있으면 명시적 초안 요청을 허용하고,
 새 ID로 같은 버전을 명시적으로 재생성할 수 있습니다. 이 구현 정책은 팀 승인 전 잠정안입니다.
 
@@ -266,18 +272,21 @@ FE 연결은 FE 담당자의 API 수정 후 별도로 확인합니다.
 `services/chat.py`는 후보 이력/AI 호출/상태 전이, `session_store.py`는 메모리 예약/저장,
 `clients/ai.py`는 기존 AI HTTP와 응답 검증을 담당합니다.
 `auth.py`는 Bearer 의존성, `clients/auth.py`는 Supabase Auth 검증과 회원 UUID 반환 담당.
+`diary_schemas.py`는 확정·조회 DTO, `api/diaries.py`는 요청 처리,
+`services/diaries.py`는 소유권·초안·버전·저장 예약, `clients/diaries.py`는 회원 JWT 조회/서버 RPC 담당.
 
 ### Supabase DB·Storage 스키마와 정책
 
-다음 SQL 2개는 Git 추적을 유지합니다. 2026-11-07 사용자 확인 기준 `today-and-near`에 001·002 적용,
+다음 SQL 파일은 Git 추적을 유지합니다. 2026-11-07 사용자 확인 기준 `today-and-near`에 001·002 적용,
 회원별 RLS·Storage 정책 생성, 비익명 테스트 회원 A/B와 Publishable key 준비가 완료되었습니다.
-에이전트가 원격 적용 상태를 다시 조회하거나 실제 회원 로그인을 수행한 결과는 아닙니다. 현재 BE API의 DB 저장 연동은 미구현입니다.
+에이전트가 원격 스키마나 실제 회원 로그인을 직접 확인한 결과는 아닙니다. DB 저장 코드 구현 완료, 003 원격 미적용.
 SQL 주석의 `docs/*.md`는 로컬 상세 문서 안내입니다. 새 clone에서도 필요한 공유 정보는 이 절에 정리합니다.
 
 | 파일 | 목적 |
 | --- | --- |
 | [20261107000100_create_member_diaries.sql](supabase/migrations/20261107000100_create_member_diaries.sql) | 테이블 3개, 제약·인덱스·권한·회원별 RLS |
 | [20261107000200_private_diary_storage_policies.sql](supabase/migrations/20261107000200_private_diary_storage_policies.sql) | 비공개 Storage 접근 정책 |
+| [20261107000300_confirm_member_diary.sql](supabase/migrations/20261107000300_confirm_member_diary.sql) | 서버 전용 원자적 저장 RPC·영속 요청 지문·고유 인덱스, 원격 미적용 |
 
 `diaries`는 `auth.users.id` 기반 회원, 서울 기준 `date`, 날씨, 확인한 글/시각, 출처 세션·버전·요청,
 선택한 AI 초안 JSON을 보관합니다. `diary_messages`는 원본 role/text/0-based position을,
@@ -289,8 +298,8 @@ SQL 주석의 `docs/*.md`는 로컬 상세 문서 안내입니다. 새 clone에�
 
 DB는 `auth.uid()` 일치와 `is_anonymous='false'` 조건으로 일반 회원의 본인 조회만 허용합니다.
 일반 회원의 직접 INSERT·수정·삭제와 미인증·익명 로그인·타 회원 조회는 차단합니다.
-Supabase Auth 인증과 메모리 세션·초안 소유권 검사 구현 완료. DB 영구 저장 경로는 미구현.
-회원 JWT를 전달하는 것만으로 DB 쓰기는 열리지 않으며 최소 권한 쓰기 경로를 별도로 설계해야 합니다.
+Supabase Auth 인증과 메모리 세션·초안 소유권 검사, 서버 전용 원자적 DB 저장 경로 구현 완료.
+회원 JWT로는 SELECT만 허용. 저장은 검증된 Auth UUID를 인수로 전달하는 서버 전용 RPC 사용.
 토큰 검증과 DB 권한 검증은 별개입니다. FE 요청 user_id를 신뢰하지 않고 검증한 회원 ID를 사용합니다.
 service_role/관리자 연결은 RLS를 우회할 수 있으므로 서버의 인증·소유권·내용 검증을 대신하지 못합니다.
 관리자 API 키는 서버 전용으로 유지하며 FE에 노출하지 않습니다.
@@ -361,6 +370,191 @@ Remove-Item Env:SUPABASE_PUBLISHABLE_KEY
 
 DB INSERT/UPDATE/DELETE와 Storage API 호출은 수행하지 않습니다. 쓰기 거절·Storage 권한·Auth 익명 회원·
 만료/변조 토큰 검증은 후속 작업입니다. 모의 테스트 통과와 실제 회원 로그인/RLS 검증은 구분합니다.
+
+### 확정 일기 저장·조회 제안 계약 — FE 전달 사항
+
+팀 합의 전 **제안 계약**입니다. 기존 대화/초안 API의 요청·성공 응답은 유지합니다.
+회원·서울 날짜당 한 권은 기존 001의 제약을 따릅니다. 날짜는 BE가 생성한 확정 요청 처리 시각을
+RPC에서 `Asia/Seoul`로 변환해 결정합니다. 클라이언트 날짜·과거 저장·수정·덮어쓰기 API는 없습니다.
+같은 버전에서 만든 초안 중 사용자가 선택한 `draft_id`를 전달합니다. 저장 중 같은 세션의 발언/초안 생성은 409입니다.
+
+```http
+POST /api/chat-sessions/ses_11111111111111111111111111111111/diaries
+Authorization: Bearer <회원 access token>
+Content-Type: application/json
+
+{
+  "client_request_id": "confirm-demo-001",
+  "history_revision": 1,
+  "draft_id": "draft_11111111111111111111111111111111",
+  "weather": "sunny"
+}
+```
+
+`client_request_id`는 확정 작업용 회원별 고유 키(ASCII 영문·숫자·밑줄·하이픈 1~128자)입니다.
+초안 생성 키와 namespace는 별도입니다. `history_revision`은 1 이상 정수, `draft_id`는 해당 세션의 실제 초안 ID입니다.
+`weather`는 생략/null 또는 `sunny`, `cloudy`, `snowy`, `rainy`입니다. 생략과 null은 동일하게 처리합니다.
+`user_id`, `confirmed_text`, `ai_draft`, `messages`, `diary_date` 등 추가 필드는 422입니다.
+본문은 저장한 검증 초안의 `text`, 대화는 서버의 전체 확정 이력에서만 가져옵니다.
+
+최초 저장과 동일 요청 복구 모두 **200**입니다. 아래 가상 예시와 같은 상세 객체를 반환합니다.
+`GET /api/diaries/44444444-4444-4444-8444-444444444444`도 동일한 응답입니다.
+
+```json
+{
+  "diary_id": "44444444-4444-4444-8444-444444444444",
+  "diary_date": "2026-11-07",
+  "weather": "sunny",
+  "confirmed_text": "오늘 친구와 공원에서 놀았다.",
+  "confirmed_at": "2026-11-06T15:00:00Z",
+  "ai_draft": {
+    "draft_id": "draft_11111111111111111111111111111111",
+    "status": "draft",
+    "text": "오늘 친구와 공원에서 놀았다.",
+    "pages": [{"text": "오늘 친구와 공원에서 놀았다.", "source_ids": [1], "imageUrl": null}],
+    "sources": [{"id": 1, "text": "오늘 친구와 공원에서 놀았다."}],
+    "fallback": true,
+    "requires_confirmation": true,
+    "mock": true
+  },
+  "messages": [
+    {"position": 0, "role": "assistant", "text": "오늘 어떤 일이 있었니?"},
+    {"position": 1, "role": "child", "text": "오늘 친구와 공원에서 놀았다."},
+    {"position": 2, "role": "assistant", "text": "무엇을 하며 놀았니?"}
+  ],
+  "imageUrl": null,
+  "assets": []
+}
+```
+
+`ai_draft`는 당시 초안의 원본 구조를 보존하므로 `status=draft`, `requires_confirmation=true`도 그대로입니다.
+최종 확정 글과 시각은 별도 `confirmed_text`, `confirmed_at`입니다. 메시지는 position 0부터 오름차순입니다.
+그림/만화는 아직 없으며 `imageUrl:null`, `assets:[]`입니다. 가짜 파일 키나 URL은 생성하지 않습니다.
+
+```http
+GET /api/diaries?month=2026-11
+Authorization: Bearer <회원 access token>
+```
+
+```json
+{
+  "month": "2026-11",
+  "diaries": [{
+    "diary_id": "44444444-4444-4444-8444-444444444444",
+    "diary_date": "2026-11-07",
+    "weather": "sunny",
+    "preview": "오늘 친구와 공원에서 놀았다."
+  }]
+}
+```
+
+월은 유효한 `YYYY-MM`(0001~9999년), 목록은 본인 데이터만 날짜 오름차순이며 빈 달은 `diaries:[]`입니다.
+미리보기는 확정 본문 앞 120자입니다. 서버 내부 조회는 본문을 가져와 자르며 FE에 전체 본문/대화는 보내지 않습니다.
+없는 일기와 타인 일기는 모두 `404 DIARY_NOT_FOUND / 일기 없음`입니다. UUID 형식 오류는 422입니다.
+현재 메모리에 존재하는 타인 세션은 저장 요청 키와 무관하게 404이며 DB 저장 호출도 없습니다.
+
+동일 회원·동일 `client_request_id`에 세션/초안/버전/날씨가 같으면 DB 결과를 복구합니다.
+대화가 이후 바뀌거나 서버가 재시작해도 이미 성공한 요청의 결과를 반환합니다. 이 복구에는 쓰기 키가 필요하지 않습니다.
+같은 키의 다른 요청은 409, 같은 날 다른 키의 일기는 409이며 다른 회원의 같은 키는 독립적입니다.
+쓰기/읽기 timeout은 이미 커밋됐을 가능성이 있으므로 **같은 키와 본문으로만 재시도**합니다.
+신규 키로 우회하지 않습니다. 최초 저장에 성공하지 못한 미확정 세션은 재시작 시 소실됩니다.
+
+| HTTP | 신규 오류 코드 | 의미 / retryable |
+| --- | --- | --- |
+| 404 | DIARY_DRAFT_NOT_FOUND | 해당 세션 초안 없음 / false |
+| 404 | DIARY_NOT_FOUND | 본인 일기 없음 / false |
+| 409 | IDEMPOTENCY_CONFLICT | 동일 확정 키의 요청 내용 불일치 / false |
+| 409 | DIARY_DATE_CONFLICT | 해당 회원·서울 날짜의 일기 존재 / false |
+| 409 | HISTORY_REVISION_CONFLICT | 현재 이력/초안 버전 불일치 / false |
+| 409 | SESSION_BUSY | 같은 세션의 처리 진행 중 / true |
+| 422 | VALIDATION_ERROR | 월·UUID·날씨·본문 필드 형식 오류 / false |
+| 503 | DIARY_STORAGE_NOT_CONFIGURED | 쓰기 Secret key 또는 조회 설정 누락 / false |
+| 503 | DIARY_STORAGE_UNAVAILABLE | DB 연결/timeout/429/5xx / true |
+| 503 | DIARY_STORAGE_FAILED | DB 거절·권한/스키마 오류 등 / false |
+| 502 | DIARY_STORAGE_INVALID_RESPONSE | DB 응답 JSON/구조 오류 / false |
+
+인증 오류는 기존 401/403/502/503 계약을 유지합니다. DB 읽기 단계에서 회원 JWT가 거절되면 401입니다.
+모든 오류는 기존 `{error:{code,message,retryable},request_id}` 형식이며 원본 DB 오류와 키/토큰은 반환하지 않습니다.
+003 미적용 시 기존 인증·대화·초안은 유지되지만, 신규 저장은 스키마 오류로 안전하게 실패합니다.
+
+### AI 담당 유지 계약
+
+AI `/api/chat`와 `/api/diary`의 기존 요청·응답 필드/필수값을 그대로 유지합니다.
+BE는 기존 `clients/ai.py`의 응답·출처 검증 결과를 재사용하며 저장 단계에서 새 AI 검증을 추가하지 않습니다.
+프롬프트·질문 생성 전략·대화 이력 활용·문장 생성·모델/파라미터·페이지 구분 품질은 자유롭게 개선할 수 있습니다.
+BE 저장은 특정 문구·문장 길이 추정·키워드·프롬프트에 의존하지 않습니다.
+기존 구조/한도 내의 `text`, `pages`, `sources`, `fallback`, `requires_confirmation`, `mock`을 유지합니다.
+BE가 추가하는 `draft_id`, `status`와 초안 응답의 세션/버전은 기존대로입니다.
+현재 `pages[].imageUrl=null`, child 출처 인덱스/원문/순서 계약도 유지합니다.
+
+### DB 쓰기 경계와 migration 003
+
+003은 **로컬 준비 완료·원격 미적용**입니다. 001·002는 수정하지 않았으며 원격 DB/SQL Editor/Storage 작업은 수행하지 않았습니다.
+실제 원격 테이블 구조는 이번에 재조회하지 못했고, 로컬 migration과 사용자 적용 보고를 근거로 구현했습니다.
+공식 [API 키 안내](https://supabase.com/docs/guides/getting-started/api-keys)에 따라
+`sb_secret_` 키는 BE 서버 전용 `apikey` 헤더로만 전달합니다. 회원 JWT/Secret key를 AI로 보내지 않습니다.
+읽기는 Publishable key + 검증된 요청의 회원 JWT로 수행하며 명시적 회원 필터와 기존 RLS를 함께 적용합니다.
+회원별 토큰을 공유 클라이언트의 기본 헤더로 저장하지 않습니다. 쓰기 클라이언트는 별도 인스턴스이며 회원 JWT를 포함하지 않습니다.
+
+RPC는 `public.confirm_member_diary(uuid,text,text,integer,text,text,timestamptz,jsonb,jsonb) -> uuid`입니다.
+인수 순서는 `p_user_id`, `p_session_id`, `p_client_request_id`, `p_history_revision`, `p_fingerprint`,
+`p_weather`, `p_confirmed_at`, `p_ai_draft`, `p_messages`입니다.
+대상은 `public.diaries`, `public.diary_messages`와 회원 유효성 확인용 `auth.users`입니다.
+공식 [함수 권한 안내](https://supabase.com/docs/guides/database/functions#secure-a-database-function)에 따라
+`SECURITY INVOKER`, 빈 `search_path`, 명시적 스키마, PUBLIC/anon/authenticated EXECUTE 회수, service_role만 EXECUTE 허용입니다.
+service_role에는 관련 두 테이블 SELECT/INSERT, 회원 ID·익명 여부·역할·삭제 여부의 컬럼 SELECT를 명시합니다.
+일반 회원 권한이나 RLS/Storage 정책은 변경하지 않습니다. Secret key 역할의 RLS 우회는 BE의 인증·소유권 검사를 대신하지 않습니다.
+
+003은 `confirmation_fingerprint` nullable 컬럼과 회원+확정 요청 ID의 부분 고유 인덱스를 추가합니다.
+지문은 정규화한 세션/요청 ID/초안 ID/버전/날씨의 SHA-256이며 기존 행의 값을 채우거나 수정하지 않습니다.
+기존 행은 지문 null로 보존되고 과거 요청의 복구 대상은 아니지만 기존 회원·날짜 고유 제약은 계속 적용됩니다.
+RPC는 비익명 활성 회원 확인 → 회원별 트랜잭션 advisory lock → 동일 요청 지문 확인 → 날짜 충돌 확인 →
+초안 본문과 원본 메시지 INSERT를 한 트랜잭션으로 수행합니다. 메시지 실패 시 부모도 롤백되며 부분 저장을 재사용하지 않습니다.
+실패를 삼키거나 DB 저장을 자동 재시도하지 않습니다. 세션 busy는 취소/실패에도 해제합니다.
+
+서버의 `SUPABASE_SECRET_KEY`는 배포 환경/secret manager에서 주입합니다. 실제 키를 채팅·코드·FE·AI·로그에 넣지 않습니다.
+`.env.example`에는 변수 이름/설명만 있으며 현재 사용자에게 실제 키 입력을 요청하지 않습니다.
+누락 시 기존 인증/대화/조회는 유지하고 신규 쓰기만 503입니다. 전체 앱 시작에 쓰기 키를 요구하지 않습니다.
+
+### 실제 적용 전 확인과 수동 검증 — 이번 작업에서 미실행
+
+1. 대상 프로젝트·백업·migration 이력과 실제 `diaries`, `diary_messages`, `auth.users` 컬럼/제약을 대조합니다.
+   001·002 적용, 회원 SELECT 전용, RLS 활성 상태와 추가 trigger/정책 유무도 확인합니다.
+2. 폐기 가능한 로컬 Supabase에서 001·003을 먼저 적용하고
+   [tests/sql/verify_confirm_member_diary.sql](tests/sql/verify_confirm_member_diary.sql)을 실행합니다.
+   합성 회원/일기만 사용하고 마지막 ROLLBACK으로 정리합니다. 원격 프로젝트에서 실행하지 않습니다.
+   이 파일은 service_role 실행·일반 회원 RPC 금지·날짜/재전송 충돌·부모 INSERT 이후 메시지 실패 롤백을 확인하는 **미실행 검증본**입니다.
+3. 로컬 검증 후 사용자가 검토한 별도 절차로 원격 003만 하나의 트랜잭션으로 적용합니다.
+   pending migration 전체를 무조건 적용하지 않고 이름 충돌/기존 데이터/원격 스키마 차이를 먼저 확인합니다.
+   `has_function_privilege`로 anon/authenticated 실행 false, service_role true와 일반 회원 직접 쓰기 차단을 확인합니다.
+4. 서버 환경에 키를 주입한 뒤 BE `--workers 1`과 AI mock을 실행합니다. 가상 회원 A/B로 각각 로그인하고
+   본인 세션 → 발언 → 초안 → 확정(200) → 월별/상세 조회를 확인합니다. 기존 가상 일기와 같은 날이면 409가 정상입니다.
+   이를 피하려고 기존 데이터를 덮어쓰거나 삭제하지 않습니다. 별도 개발 프로젝트/빈 날짜를 준비합니다.
+5. 원본 대화의 role/position/text, 초안 JSON, 본문, 서울 날짜를 비교합니다. 같은 키/내용은 같은 ID,
+   날씨/초안/버전/세션 변경은 409, 다른 키의 같은 날 일기는 409, A/B 같은 키는 독립 처리인지 확인합니다.
+6. A→B/B→A 세션 저장은 404, 일기 상세도 404, 월별 목록은 본인만 확인합니다.
+   무토큰/무효/만료는 401이며 DB 쓰기 없음, 익명은 403인지 확인합니다.
+7. BE 재시작 뒤 월별/상세 조회와 같은 확정 요청 복구를 확인합니다. 미확정 세션은 404가 정상입니다.
+   DB 장애·키 누락 시 안전한 오류와 원문 비노출, 네트워크 응답 유실 뒤 같은 키로 결과 복구도 확인합니다.
+8. 회원 JWT로 직접 DB INSERT/UPDATE/DELETE와 RPC 호출 거절을 별도로 확인합니다.
+   관리자 권한으로 성공한 저장을 RLS 격리 성공으로 해석하지 않습니다.
+
+자동 테스트는 HTTPX 모의 RPC의 부분 실패/동시 요청/응답 유실·새 앱 생성 후 복구와 SQL의 권한/고유 제약을 검사합니다.
+실제 SQL 구문 실행·PostgreSQL 롤백·원격 RLS/인증·Secret key 연동·브라우저 통합은 이번에 수행하지 않았습니다.
+Python 의존성 추가는 없습니다. 실제 DB 원자성과 권한은 위 로컬/사용자 수동 절차로 최종 확인해야 합니다.
+
+2026-11-07 **사용자 수동 보고**: A/B 각각 diaries 1행·diary_messages 3행, 비익명 로그인·서로 다른 회원 ID,
+본인 조회·상대 조회 차단·알려진 가상 일기 ID 양방향 교차 조회·미인증 DB 거절 확인.
+diary_assets는 양쪽 0행으로 격리 미완료이며 종료 코드 2는 미검증 자산 데이터 때문입니다.
+이전 전부 0행 결과는 과거 기록입니다. 위 결과는 본 에이전트가 직접 실행한 검증이 아닙니다.
+
+### 그림 원본 업로드 후속 작업
+
+실제 JPEG/PNG 디코딩·크기/픽셀/해시 검증과 서버가 만든 회원/일기/자산 경로를 먼저 구현합니다.
+비공개 Storage `upsert=false` 업로드, DB 자산 참조의 영속 요청 상태, 실패/응답 유실 시 고아 파일 복구를 설계합니다.
+DB와 Storage는 같은 트랜잭션으로 묶이지 않으므로 재시도·정리 상태가 필요합니다.
+자산이 있는 A/B의 실제 조회 격리·회원 직접 업로드 차단·서명 URL 수명도 별도 검증합니다.
+공유 세션 저장소를 구현하기 전까지 미확정 대화는 단일 worker 메모리 한계를 유지합니다.
 
 ### Git 작업 흐름
 

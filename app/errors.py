@@ -35,7 +35,11 @@ def install_error_handlers(app: FastAPI) -> None:
     async def validation_error(request: Request, error: RequestValidationError):
         # 입력 전문과 Pydantic 내부 오류를 FE에 반환하지 않습니다.
         return error_response(request, AppError(
-            422, "VALIDATION_ERROR", "요청 형식과 입력 한도를 확인해 주세요.",
+            422, "VALIDATION_ERROR", (
+                "요청 형식 오류" if (request.url.path.startswith("/api/diaries")
+                                    or request.url.path.endswith("/diaries"))
+                else "요청 형식과 입력 한도를 확인해 주세요."
+            ),
         ))
 
     @app.exception_handler(HTTPException)
