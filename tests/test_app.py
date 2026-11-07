@@ -28,7 +28,7 @@ async def test_cors():
     ) as client:
         headers = {"Origin": "http://127.0.0.1:5500",
                    "Access-Control-Request-Method": "POST",
-                   "Access-Control-Request-Headers": "Content-Type,Idempotency-Key"}
+                   "Access-Control-Request-Headers": "Content-Type,Authorization,Idempotency-Key,X-Request-ID"}
         response = await client.options("/api/chat-sessions", headers=headers)
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == headers["Origin"]

@@ -15,6 +15,16 @@ from app.main import create_app
 AI_URL = "http://127.0.0.1:8002"
 
 
+def fake_auth(request):
+    # 로컬 mock 검증 전용 가짜 회원
+    assert request.url.path == "/auth/v1/user"
+    assert request.headers["authorization"] == "Bearer fake-mock-member"
+    return httpx.Response(200, json={
+        "id": "33333333-3333-4333-8333-333333333333", "role": "authenticated",
+        "aud": "authenticated", "is_anonymous": False,
+    })
+
+
 class RecordingTransport(httpx.AsyncBaseTransport):
     def __init__(self):
         self.inner = httpx.AsyncHTTPTransport(retries=0)
@@ -39,9 +49,12 @@ async def main():
             raise SystemExit("기존 AI의 mock 상태를 확인하지 못해 생성 요청 없이 종료합니다.") from error
 
     transport = RecordingTransport()
-    app = create_app(Settings(ai_base_url=AI_URL), transport)
+    app = create_app(Settings(
+        ai_base_url=AI_URL, supabase_publishable_key="sb_publishable_fake_mock_key",
+    ), transport, httpx.MockTransport(fake_auth))
     async with app.router.lifespan_context(app), httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://be.test",
+        headers={"Authorization": "Bearer fake-mock-member"},
     ) as be:
         start = await be.post("/api/chat-sessions", json={}, headers={
             "Idempotency-Key": f"verify-{uuid4().hex}",

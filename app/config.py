@@ -1,11 +1,12 @@
 import os
+import re
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
 class Settings(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     ai_base_url: str = "http://127.0.0.1:8002"
     allowed_origins: tuple[str, ...] = (
@@ -16,6 +17,29 @@ class Settings(BaseModel):
     ai_write_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
     ai_pool_timeout_seconds: float = Field(default=3, gt=0, allow_inf_nan=False)
     ai_request_timeout_seconds: float = Field(default=135, gt=0, allow_inf_nan=False)
+    supabase_url: str = "https://nnbmxtiouvsuszretahg.supabase.co"
+    supabase_publishable_key: SecretStr | None = None
+    auth_request_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
+
+    @field_validator("supabase_url")
+    @classmethod
+    def validate_supabase_url(cls, value: str) -> str:
+        url = urlsplit(value)
+        if (url.scheme != "https" or not url.hostname
+                or url.username is not None or url.password is not None
+                or url.query or url.fragment or url.path not in {"", "/"}
+                or url.port not in {None, 443}):
+            raise ValueError("SUPABASE_URL: 인증정보 없는 HTTPS origin 필요")
+        return value.rstrip("/")
+
+    @field_validator("supabase_publishable_key")
+    @classmethod
+    def validate_publishable_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not re.fullmatch(
+            r"sb_publishable_[A-Za-z0-9_-]+", value.get_secret_value(),
+        ):
+            raise ValueError("SUPABASE_PUBLISHABLE_KEY: Publishable key 필요")
+        return value
 
     @field_validator("ai_base_url")
     @classmethod

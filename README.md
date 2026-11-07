@@ -4,9 +4,10 @@
 
 FE → BE → 기존 AI HTTP 서버로 이어지는 최소 텍스트 대화·일기 초안 서버입니다.
 아래 FE·BE API 계약은 **팀 합의 전 잠정 계약**입니다.
-실제 아동 데이터를 사용하지 마세요. 현재 구현에는 인증·DB·그림 저장·최종 일기 확인/저장·이미지 생성이 없습니다.
+Supabase 비익명 회원 토큰 인증 지원. 실제 아동 데이터 사용 금지.
+DB·그림 저장·최종 일기 확인/저장·이미지 생성은 미구현.
 
-회원별 그림일기의 SQL은 **미적용 검토용**이며 현재 API에 연결되어 있지 않습니다.
+회원별 그림일기 SQL 001·002는 사용자 확인 기준 적용 완료. 현재 API의 DB 연결은 미구현.
 스키마·보안 요약과 적용 전 확인 순서는 아래에 있습니다.
 
 ## 개발 환경
@@ -44,6 +45,8 @@ PowerShell 실행 정책 때문에 활성화가 막혀도 가상환경의 Python
 .\.venv\Scripts\python.exe -m pytest -q
 $env:AI_BASE_URL = 'http://127.0.0.1:8002'
 $env:ALLOWED_ORIGINS = 'http://127.0.0.1:5500,http://localhost:5500'
+$env:SUPABASE_URL = 'https://nnbmxtiouvsuszretahg.supabase.co'
+$env:SUPABASE_PUBLISHABLE_KEY = Read-Host 'Supabase Publishable key'
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
@@ -62,12 +65,48 @@ AI 서버 상태를 검사하는 경로는 아닙니다. API 문서는 `/docs`�
 | AI_WRITE_TIMEOUT_SECONDS | 10, 쓰기 |
 | AI_POOL_TIMEOUT_SECONDS | 3, 풀 대기 |
 | AI_REQUEST_TIMEOUT_SECONDS | 135, 전체 AI 요청 |
+| SUPABASE_URL | `https://nnbmxtiouvsuszretahg.supabase.co`, 인증정보 없는 HTTPS origin |
+| SUPABASE_PUBLISHABLE_KEY | 필수, `sb_publishable_` 형식만 허용. Secret/service_role/JWT 형식 키 금지 |
+| AUTH_REQUEST_TIMEOUT_SECONDS | 10, Auth HTTP 및 전체 요청 제한 |
 
 변수 예시는 Git에서 공유하는 [.env.example](.env.example)에도 있습니다.
 개발 CORS는 지정한 origin만 허용하고 자격증명 전송을 허용하지 않습니다.
+허용 헤더: `Authorization`, `Content-Type`, `Idempotency-Key`, `X-Request-ID`.
+응답 `X-Request-ID`는 BE 생성값이며 기존과 동일하게 브라우저에 노출.
 `file://` 대신 정적 서버를 사용하고 FE 주소와 `ALLOWED_ORIGINS`를 맞추세요.
 
 ### API와 저장 방식
+
+세 POST API 모두 `Authorization: Bearer <Supabase access token>` 필수. `GET /health` 공개 유지.
+요청 본문·성공 응답 필드와 기존 요청 ID/버전 규칙 유지. `user_id` 등 추가 필드는 기존대로 422.
+
+### Supabase 회원 인증
+
+2026-11-07 대상 프로젝트의 공개 `/auth/v1/.well-known/jwks.json` 조회 결과: ES256 공개키 1개.
+공개키 존재는 현재 발급 토큰 전부의 알고리즘을 확정하는 근거는 아니므로 Dashboard의 활성 키도 수동 확인.
+JWKS 로컬 검증은 서명·고정 issuer·audience·만료·role 검증과 키 교체/캐시 관리가 필요.
+이번 선택은 [공식 Auth `/user` 검증](https://supabase.com/docs/guides/auth/jwts#verifying-with-a-shared-secret-signing-key).
+매 요청마다 고정된 `SUPABASE_URL/auth/v1/user`에 Publishable key와 회원 Bearer 토큰 전달.
+Auth 서버에 서명·토큰 유효성·만료 검증 위임 후, 200 응답의 UUID와
+`is_anonymous=false`, `role=authenticated`, `aud=authenticated` 모두 확인.
+최신 회원 정보 확인과 ES256/레거시 키 교체 대응, 기존 RLS 도구와 같은 검증 경로가 선택 근거.
+JWT 자체 구현·서명 없는 디코딩·관리자 키·인증 성공 캐시·자동 재시도 없음.
+대신 매 요청의 Auth 통신 지연/장애 의존성 존재. 운영 환경은 Supabase와 가까운 리전 권장.
+설정 누락 시 health는 공개하되 보호 API는 503 `AUTH_NOT_CONFIGURED`로 차단.
+
+| HTTP | 추가 오류 코드 | 의미 / retryable |
+| --- | --- | --- |
+| 401 | AUTHENTICATION_FAILED | 토큰 없음·형식 오류·Auth 400/401/403(무효·만료 포함), false, `WWW-Authenticate: Bearer` |
+| 403 | ACCESS_DENIED | 검증된 회원의 익명 여부·역할·audience 조건 불충족, false |
+| 503 | AUTH_UNAVAILABLE | 연결 실패·timeout·Auth 429/5xx, true |
+| 502 | AUTH_INVALID_RESPONSE | 잘못된 JSON/UUID·예상 밖 상태·redirect, false |
+| 503 | AUTH_NOT_CONFIGURED | Publishable key 설정 누락, false |
+
+공통 `{error:{code,message,retryable},request_id}`와 no-store 유지. 공급자 오류/토큰 원문 반환 금지.
+FE는 무효·만료 토큰을 새로 로그인/갱신한 뒤 재요청. BE는 Refresh Token 취급 없음.
+Auth 연결 오류는 인증/세션 예약 이전 실패이므로 같은 요청 ID로 명시적 재시도 가능.
+
+### 대화·초안 계약
 
 | API | 기능 |
 | --- | --- |
@@ -154,6 +193,7 @@ BE ASGI → 별도 AI 프로세스의 실제 HTTP 대화 3회(시작+발언 2회
 ```
 
 스크립트는 먼저 `/api/status`를 조회하고 서버 미실행·오류·mock 이외 모드면 생성 요청 없이 종료합니다.
+인증 부분은 스크립트 내부 MockTransport와 가짜 회원 토큰만 사용. 실제 Supabase Auth 연동 검증과 구분.
 서버를 시작하거나 AI 저장소를 수정/설치하지 않습니다. 실제 Groq·Cloudflare 등 모델을 호출하지 않습니다.
 서버가 없을 때는 AI 담당자가 기존 코드와 **AI 전용** 가상환경을 준비하고 다음처럼 실행한 뒤 재검증합니다.
 BE의 Python 호환성 결과를 AI SDK·AI 실행 환경의 호환성 결과로 간주하지 않습니다.

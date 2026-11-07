@@ -21,7 +21,8 @@ def error_response(request: Request, error: AppError) -> JSONResponse:
         status_code=error.status,
         content={"error": {"code": error.code, "message": error.message,
                            "retryable": error.retryable}, "request_id": request_id},
-        headers={"X-Request-ID": request_id, "Cache-Control": "no-store"},
+        headers={"X-Request-ID": request_id, "Cache-Control": "no-store",
+                 **({"WWW-Authenticate": "Bearer"} if error.status == 401 else {})},
     )
 
 

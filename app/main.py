@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router
 from app.clients.ai import AIClient
+from app.clients.auth import AuthClient
 from app.config import Settings
 from app.errors import install_error_handlers
 from app.services.chat import ChatService
@@ -13,7 +14,8 @@ from app.session_store import SessionStore
 
 
 def create_app(settings: Settings | None = None,
-               ai_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
+               ai_transport: httpx.AsyncBaseTransport | None = None,
+               auth_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
 
     @asynccontextmanager
@@ -24,11 +26,22 @@ def create_app(settings: Settings | None = None,
             write=settings.ai_write_timeout_seconds,
             pool=settings.ai_pool_timeout_seconds,
         )
-        async with httpx.AsyncClient(
-            base_url=settings.ai_base_url, timeout=timeout,
-            transport=ai_transport or httpx.AsyncHTTPTransport(retries=0),
-            follow_redirects=False, trust_env=False,
-        ) as http:
+        async with AsyncExitStack() as stack:
+            http = await stack.enter_async_context(httpx.AsyncClient(
+                base_url=settings.ai_base_url, timeout=timeout,
+                transport=ai_transport or httpx.AsyncHTTPTransport(retries=0),
+                follow_redirects=False, trust_env=False,
+            ))
+            app.state.auth_client = None
+            if settings.supabase_publishable_key is not None:
+                auth_http = await stack.enter_async_context(httpx.AsyncClient(
+                    base_url=settings.supabase_url,
+                    headers={"apikey": settings.supabase_publishable_key.get_secret_value()},
+                    timeout=settings.auth_request_timeout_seconds,
+                    transport=auth_transport or httpx.AsyncHTTPTransport(retries=0),
+                    follow_redirects=False, trust_env=False,
+                ))
+                app.state.auth_client = AuthClient(auth_http, settings.auth_request_timeout_seconds)
             app.state.chat_service = ChatService(
                 SessionStore(), AIClient(http, settings.ai_request_timeout_seconds),
             )
@@ -42,7 +55,7 @@ def create_app(settings: Settings | None = None,
         allow_origins=list(settings.allowed_origins),
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type", "Idempotency-Key"],
+        allow_headers=["Content-Type", "Authorization", "Idempotency-Key", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
     )
 
