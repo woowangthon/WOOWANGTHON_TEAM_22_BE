@@ -7,7 +7,7 @@ FE → BE → 기존 AI HTTP 서버로 이어지는 최소 텍스트 대화·일
 Supabase 비익명 회원 토큰 인증과 회원별 세션·초안 소유권 검사 지원. 실제 아동 데이터 사용 금지.
 확정 일기·원본 대화의 DB 저장과 월별/상세 조회 구현. 그림 저장·이미지 생성·일기 수정은 미구현.
 
-회원별 그림일기 SQL 001·002는 사용자 확인 기준 적용 완료. 신규 저장에 필요한 SQL 003은 원격 미적용.
+회원별 그림일기 SQL 001·002·003은 2026-11-07 사용자 확인 기준 실제 Supabase 적용 완료.
 스키마·보안 요약과 적용 전 확인 순서는 아래에 있습니다.
 
 ## 개발 환경
@@ -359,7 +359,7 @@ Remove-Item Env:SUPABASE_PUBLISHABLE_KEY
 `2`는 로그인·조회·미인증 거절은 확인했으나 **본인 데이터 부족으로 회원 간 격리는 미완료**입니다.
 표본 검증이며 전체 행·모든 RLS 정책의 검증 완료를 뜻하지 않습니다.
 
-향후 별도 승인된 절차로 가상 일기 A/B가 준비되면 알려진 UUID를 지정해 본인 조회와 상대 ID 조회도 확인할 수 있습니다.
+현재 사용자 보고 기준 가상 일기 A/B가 준비돼 있으며, 알려진 UUID를 지정해 본인 조회와 상대 ID 조회도 확인할 수 있습니다.
 `check_fixture`를 다른 가상 데이터의 양방향 조회 검사로 확장할 수 있으며 이 도구는 fixture를 생성하지 않습니다.
 
 ```powershell
@@ -370,6 +370,65 @@ Remove-Item Env:SUPABASE_PUBLISHABLE_KEY
 
 DB INSERT/UPDATE/DELETE와 Storage API 호출은 수행하지 않습니다. 쓰기 거절·Storage 권한·Auth 익명 회원·
 만료/변조 토큰 검증은 후속 작업입니다. 모의 테스트 통과와 실제 회원 로그인/RLS 검증은 구분합니다.
+
+### 실제 Supabase와 BE 일기 GET 검증
+
+[scripts/verify_diary_reads.py](scripts/verify_diary_reads.py)는 기존 `Settings`, `create_app`,
+`AuthClient`, `DiaryRepository`와 GET 라우트를 그대로 사용합니다. BE 앱의 lifespan과 ASGI 요청을
+로컬 프로세스에서 실행하고 Auth·DB는 실제 today-and-near에 연결합니다. 별도 BE/AI 서버는 필요 없습니다.
+실행 중에도 Secret key를 제외하며, 전송 계층은 지정 프로젝트의 Auth 회원 확인·일기/메시지 GET과
+비밀번호 로그인 POST만 허용합니다. DB 쓰기·RPC·Storage·AI 호출·자동 재시도·토큰 갱신은 없습니다.
+
+**아래 블록 전체를 한 번에 복사·실행**합니다. Windows PowerShell의 로컬 대화형 터미널을 사용하세요.
+`오늘,그리고` 폴더 위치가 다르면 첫 경로만 바꿉니다. 기존 BE `.venv`를 사용하며 추가 패키지는 없습니다.
+
+```powershell
+& {
+    Set-Location -LiteralPath 'C:\Users\gicha\OneDrive\바탕 화면\오늘,그리고\WOOWANGTHON_TEAM_22_BE'
+    $env:SUPABASE_URL = 'https://nnbmxtiouvsuszretahg.supabase.co'
+    $diaryReadKey = Read-Host 'Supabase Publishable key (숨김)' -AsSecureString
+    try {
+        $env:SUPABASE_PUBLISHABLE_KEY = [System.Net.NetworkCredential]::new('', $diaryReadKey).Password
+        .\.venv\Scripts\python.exe -m scripts.verify_diary_reads
+    }
+    finally {
+        Remove-Item Env:SUPABASE_PUBLISHABLE_KEY -ErrorAction SilentlyContinue
+        $diaryReadKey.Dispose()
+    }
+}
+```
+
+Publishable key(`sb_publishable_...`)는 사용자가 환경변수로 직접 전달하며 명령 기록에 값이 남지 않습니다.
+부모 PowerShell의 Publishable key 변수는 종료 시 제거합니다. 실제 Secret key는 입력하지 않습니다.
+자식 Python 프로세스는 상속된 `SUPABASE_SECRET_KEY`도 설정 로딩 전에 제거합니다.
+이후 **A 이메일 → A 비밀번호 → B 이메일 → B 비밀번호**를 모두 숨김 입력합니다.
+파이프·비대화형 터미널·숨김 입력 불가 상태에서는 네트워크 요청 전에 중단합니다.
+계정·키·토큰·본문·대화·응답 원문·예외 원문은 출력하거나 파일에 저장하지 않습니다.
+
+검사 결과는 항목별 `성공`/`실패`만 표시합니다. 다음 12개 항목 전부 성공하고 종료 코드가 `0`이면 통과입니다.
+설정/입력/실행 자체 오류는 `검증 실행: 실패`와 종료 코드 `1`, 개별 검사 실패도 종료 코드 `1`입니다.
+로그인 실패 등으로 선행 조건이 없으면 후속 검사는 실패로 표시하며 성공으로 간주하지 않습니다.
+
+- 미인증 월별·A 상세·B 상세 GET 각각 401: 3개.
+- A/B 실제 로그인과 기존 Auth 클라이언트의 비익명 회원 검증: 2개.
+- A/B 이메일·Auth 회원 ID·토큰 상이: 1개.
+- A/B 각 본인 상세 200·상대 상세 `404 DIARY_NOT_FOUND`·월별 본인 일기만 노출: 6개.
+
+대상은 `GET /api/diaries?month=2026-11`과 `GET /api/diaries/{diary_id}`입니다.
+기존 가상 일기는 A `77e0ebce-127d-4bb4-84ef-8d89d6c06a90`, B `49df086e-a986-41ef-8e95-e8997ff270cc`,
+날짜는 모두 `2026-11-07`입니다. 월별 목록은 알려진 본인 일기 **정확히 1건**이어야 합니다.
+빈 목록·상대 일기·알 수 없는 추가 ID·중복·다른 날짜는 실패입니다. 해당 월에 정상 일기가 추가돼도 실패하므로
+데이터 변경 없이 현재 fixture 전제를 먼저 확인하세요. 본문 문구·AI 프롬프트·모델·생성 품질 비교는 하지 않습니다.
+
+자동 테스트는 실제 BE 경로와 HTTPX 모의 Auth/DB로 판정·조회 경계·비밀정보 비노출을 검사합니다.
+실제 회원 로그인·원격 조회는 사용자가 위 명령을 실행하기 전까지 **미검증**입니다.
+배포된 HTTP 서버·브라우저/CORS·전체 DB 행과 RLS 정책·Storage·저장/RPC·동시성은 이 도구의 검증 범위 밖입니다.
+이 도구는 Auth 로그인으로 세션을 발급받지만 DB 데이터나 스키마를 변경하지 않습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q -W error tests/test_verify_diary_reads.py
+.\.venv\Scripts\python.exe -m pytest -q -W error
+```
 
 ### 확정 일기 저장·조회 제안 계약 — FE 전달 사항
 
@@ -489,8 +548,11 @@ BE가 추가하는 `draft_id`, `status`와 초안 응답의 세션/버전은 기
 
 ### DB 쓰기 경계와 migration 003
 
-003은 **로컬 준비 완료·원격 미적용**입니다. 001·002는 수정하지 않았으며 원격 DB/SQL Editor/Storage 작업은 수행하지 않았습니다.
-실제 원격 테이블 구조는 이번에 재조회하지 못했고, 로컬 migration과 사용자 적용 보고를 근거로 구현했습니다.
+003은 **2026-11-07 사용자 SQL Editor 확인 기준 실제 적용 완료**입니다. 001·002도 적용 완료입니다.
+사용자는 `confirmation_fingerprint` 컬럼·중복 방지 인덱스·`confirm_member_diary` RPC 존재와
+`SECURITY INVOKER`, anon/authenticated RPC 실행 불가, service_role 실행 가능,
+authenticated의 `diaries` 직접 INSERT 불가를 확인했습니다.
+에이전트는 실제 원격 구조·권한을 재조회하거나 DB/SQL Editor/Storage를 변경하지 않았습니다.
 공식 [API 키 안내](https://supabase.com/docs/guides/getting-started/api-keys)에 따라
 `sb_secret_` 키는 BE 서버 전용 `apikey` 헤더로만 전달합니다. 회원 JWT/Secret key를 AI로 보내지 않습니다.
 읽기는 Publishable key + 검증된 요청의 회원 JWT로 수행하며 명시적 회원 필터와 기존 RLS를 함께 적용합니다.
@@ -522,7 +584,11 @@ SQL `DETAIL` / 응답 `details`의 `IDEMPOTENCY_CONFLICT`·`DIARY_DATE_CONFLICT`
 `.env.example`에는 변수 이름/설명만 있으며 현재 사용자에게 실제 키 입력을 요청하지 않습니다.
 누락 시 기존 인증/대화/조회는 유지하고 신규 쓰기만 503입니다. 전체 앱 시작에 쓰기 키를 요구하지 않습니다.
 
-### 실제 적용 전 확인과 수동 검증 — 이번 작업에서 미실행
+### 저장 기능의 추가 수동 검증 — 에이전트 미실행
+
+001·002·003 적용과 위 컬럼·인덱스·RPC·권한 확인은 사용자 수동 보고 기준 완료입니다.
+아래 1~3번은 신규 환경의 적용 절차 참고이며, 현재 프로젝트에 다시 적용하는 지시가 아닙니다.
+GET 검증만 수행할 때는 앞의 조회 전용 도구를 사용하며 아래 저장·RPC 검증은 실행하지 않습니다.
 
 1. 대상 프로젝트·백업·migration 이력과 실제 `diaries`, `diary_messages`, `auth.users` 컬럼/제약을 대조합니다.
    001·002 적용, 회원 SELECT 전용, RLS 활성 상태와 추가 trigger/정책 유무도 확인합니다.
