@@ -3,13 +3,11 @@
 오늘,그리고 프로젝트의 BE 저장소입니다. FE와 AI는 각각 별도 Git 저장소에서 관리합니다.
 
 FE → BE → 기존 AI HTTP 서버로 이어지는 최소 텍스트 대화·일기 초안 서버입니다.
-[FE·BE API 계약](docs/CHAT_API_CONTRACT.md)은 **팀 합의 전 잠정 계약**입니다.
+아래 FE·BE API 계약은 **팀 합의 전 잠정 계약**입니다.
 실제 아동 데이터를 사용하지 마세요. 현재 구현에는 인증·DB·그림 저장·최종 일기 확인/저장·이미지 생성이 없습니다.
 
-회원별 그림일기의 [Supabase DB 스키마·RLS 초안](docs/DIARY_DB_SCHEMA.md)과
-[비공개 Storage 준비·접근 정책](docs/DIARY_STORAGE_POLICY.md)을 별도로 작성했습니다.
-`supabase/migrations/`의 SQL은 **미적용 검토용**이며 현재 API에 연결되어 있지 않습니다.
-적용 전 확인 순서와 사용자/날짜/원본 보존의 미정 사항은 두 문서를 확인하세요.
+회원별 그림일기의 SQL은 **미적용 검토용**이며 현재 API에 연결되어 있지 않습니다.
+스키마·보안 요약과 적용 전 확인 순서는 아래에 있습니다.
 
 ## 개발 환경
 
@@ -53,7 +51,19 @@ $env:ALLOWED_ORIGINS = 'http://127.0.0.1:5500,http://localhost:5500'
 AI 서버 상태를 검사하는 경로는 아닙니다. API 문서는 `/docs`에서 확인합니다.
 `.env.example`은 설정 참고용이며 `.env`를 자동 로딩하지 않습니다. PowerShell 환경변수를 사용하세요.
 타임아웃 기본값은 연결 3초, 읽기 130초, 쓰기 10초, 풀 대기 3초, 전체 AI 대기 135초입니다.
-각 이름은 `.env.example`에 있으며 0·음수·무한대는 허용하지 않습니다.
+환경변수는 아래와 같으며 timeout에 0·음수·무한대는 허용하지 않습니다.
+
+| 환경변수 | 기본값/의미 |
+| --- | --- |
+| AI_BASE_URL | `http://127.0.0.1:8002`, 인증정보 없는 HTTP(S) origin |
+| ALLOWED_ORIGINS | `http://127.0.0.1:5500,http://localhost:5500`, 쉼표로 구분 |
+| AI_CONNECT_TIMEOUT_SECONDS | 3, 연결 |
+| AI_READ_TIMEOUT_SECONDS | 130, 읽기 |
+| AI_WRITE_TIMEOUT_SECONDS | 10, 쓰기 |
+| AI_POOL_TIMEOUT_SECONDS | 3, 풀 대기 |
+| AI_REQUEST_TIMEOUT_SECONDS | 135, 전체 AI 요청 |
+
+변수 예시는 Git에서 공유하는 [.env.example](.env.example)에도 있습니다.
 개발 CORS는 지정한 origin만 허용하고 자격증명 전송을 허용하지 않습니다.
 `file://` 대신 정적 서버를 사용하고 FE 주소와 `ALLOWED_ORIGINS`를 맞추세요.
 
@@ -66,6 +76,14 @@ AI 서버 상태를 검사하는 경로는 아닙니다. API 문서는 `/docs`�
 | POST /api/chat-sessions/{session_id}/messages | client_message_id와 text를 보내 대화 진행 |
 | POST /api/chat-sessions/{session_id}/diary-draft | client_request_id와 history_revision으로 기존 확정 이력의 일기 초안 생성 |
 
+시작 요청은 `Idempotency-Key` 헤더와 JSON `{}`를 보내며 성공 시 201입니다.
+발언 요청은 `{"client_message_id":"turn-demo-001","text":"가상 인물과 공놀이했어."}`이고 성공 시 200입니다.
+두 응답은 `{session_id,history_revision,reply:{message_id,role:"assistant",text},finished,mock,fallback}`이며,
+발언 응답에는 `client_message_id`가 추가됩니다.
+시작 키·발언/초안 요청 ID는 ASCII 영문·숫자·밑줄·하이픈 1~128자입니다.
+요청은 JSON/UTF-8이며 정의하지 않은 필드는 422로 거절합니다.
+응답은 `Cache-Control: no-store`와 `X-Request-ID`를 포함합니다.
+
 AI 주소는 HTTP(S) origin으로 지정합니다. BE는 `/api/chat`, `/api/diary`를 호출하며 자동 재시도하지 않습니다.
 세션별 전체 확정 이력을 전달하고 성공한 발언/답변만 함께 보관합니다.
 실패한 요청은 확정 이력을 바꾸지 않습니다. 요청 ID별 성공·실패 기록으로 중복 호출을 방지합니다.
@@ -75,7 +93,8 @@ AI 주소는 HTTP(S) origin으로 지정합니다. BE는 `/api/chat`, `/api/diar
 세션과 요청 기록은 단일 프로세스 메모리에만 있습니다. **BE 재시작 시 모두 사라집니다.**
 TTL·영구 저장·자동 정리는 없으며 짧은 로컬 개발 검증용입니다.
 `--workers 1`을 유지하고 최초 연동 검증에서는 `--reload`를 사용하지 않습니다.
-세부 JSON·오류 코드·2,000자/60개/20,000자 한도는 계약 문서를 확인하세요.
+발언은 공백뿐인 값·잘못된 Unicode를 제외한 1~2,000자이며 원문을 보존합니다.
+전체 이력은 60개/20,000자 이내이고 AI 답변 150자 여유를 확보하므로 최대 29회 왕복입니다.
 
 대화 시작/발언 응답의 `history_revision`은 시작 시 0, 발언+AI 답변 확정마다 1씩 증가합니다.
 초안 요청 예시(발언 1회 성공 후):
@@ -94,6 +113,19 @@ FE는 messages를 제출하지 않습니다. BE가 첫 질문부터 마지막 �
 아이 발언이 없으면 422, 대화 버전이 다르면 409입니다. 같은 요청 ID+버전 재전송은 캐시를 복구합니다.
 초안 생성과 발언은 같은 세션에서 동시에 진행할 수 없습니다. timeout 이후 같은 ID로 AI를 재호출하지 않습니다.
 초안은 메모리 재전송 캐시일 뿐이며 **최종 일기·영구 저장·사용자 확인 완료가 아닙니다.**
+
+초안 `pages`는 `{text,source_ids,imageUrl:null}` 1~6개, `sources`는 `{id,text}` 목록입니다.
+본문/페이지 글은 최대 20,000자이며 출처는 전체 이력의 child 원문·순서와 일치해야 합니다.
+`fallback`, `mock`이 true여도 확인 전 정상 초안일 수 있습니다.
+현재는 `finished=true`를 요구하지 않으며 새 요청 ID로 같은 버전을 명시적으로 재생성할 수 있습니다.
+FE는 늦게 도착한 과거 버전 응답으로 최신 화면을 덮어쓰지 않아야 합니다.
+
+오류는 `{error:{code,message,retryable},request_id}` 형식입니다.
+주요 오류는 404 `SESSION_NOT_FOUND`, 409 `IDEMPOTENCY_CONFLICT`/`REQUEST_IN_PROGRESS`/
+`SESSION_BUSY`/`HISTORY_REVISION_CONFLICT`, 422 `NO_CHILD_MESSAGES`/`CONVERSATION_LIMIT_REACHED`입니다.
+같은 ID·같은 입력의 성공 재전송은 캐시를 복구합니다. 연결 전 실패인 `AI_CONNECTION_FAILED`만
+같은 ID로 명시적 재시도하며, timeout/전송 후 결과 불명인 `AI_OUTCOME_UNKNOWN`은 자동 재시도하거나
+새 키로 우회하지 않습니다. 공급자 오류는 공통 502/503/504 오류로 변환합니다.
 
 ### 모의 테스트와 Python 호환성
 
@@ -134,36 +166,10 @@ $env:PORT = '8002'
 .\.venv\Scripts\python.exe server.py
 ```
 
-`GET http://127.0.0.1:8002/api/status`의 `mode=mock`을 **생성 요청 전에** 확인하고,
-BE는 앞의 실행 명령으로 별도 터미널에서 실행합니다.
-세 번째 PowerShell에서 가상 문장만 사용해 두 번 왕복합니다.
-
-```powershell
-$beUrl = 'http://127.0.0.1:8000'
-$startKey = [guid]::NewGuid().ToString('N')
-$session = Invoke-RestMethod -Method Post -Uri "$beUrl/api/chat-sessions" -ContentType 'application/json' -Headers @{'Idempotency-Key'=$startKey} -Body '{}'
-if (-not $session.mock) { throw 'AI를 mock 모드로 준비한 뒤 다시 검증하세요.' }
-$sessionId = $session.session_id
-$firstBody = @{client_message_id=[guid]::NewGuid().ToString('N'); text='가상 인물과 공놀이한 이야기야.'} | ConvertTo-Json -Compress
-$firstBytes = [Text.Encoding]::UTF8.GetBytes($firstBody)
-$firstReply = Invoke-RestMethod -Method Post -Uri "$beUrl/api/chat-sessions/$sessionId/messages" -ContentType 'application/json; charset=utf-8' -Body $firstBytes
-$secondBody = @{client_message_id=[guid]::NewGuid().ToString('N'); text='가상 인물은 즐거웠다고 했어.'} | ConvertTo-Json -Compress
-$secondReply = Invoke-RestMethod -Method Post -Uri "$beUrl/api/chat-sessions/$sessionId/messages" -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($secondBody))
-$replayed = Invoke-RestMethod -Method Post -Uri "$beUrl/api/chat-sessions/$sessionId/messages" -ContentType 'application/json; charset=utf-8' -Body $firstBytes
-if ($replayed.reply.message_id -ne $firstReply.reply.message_id) { throw '중복 응답 ID 불일치' }
-if (-not $firstReply.mock -or -not $secondReply.mock) { throw 'mock 모드 확인 필요' }
-$session, $firstReply, $secondReply, $replayed | ConvertTo-Json -Depth 5
-$draftBody = @{client_request_id=[guid]::NewGuid().ToString('N'); history_revision=$secondReply.history_revision} | ConvertTo-Json -Compress
-$draftBytes = [Text.Encoding]::UTF8.GetBytes($draftBody)
-$draft = Invoke-RestMethod -Method Post -Uri "$beUrl/api/chat-sessions/$sessionId/diary-draft" -ContentType 'application/json; charset=utf-8' -Body $draftBytes
-$draftReplay = Invoke-RestMethod -Method Post -Uri "$beUrl/api/chat-sessions/$sessionId/diary-draft" -ContentType 'application/json; charset=utf-8' -Body $draftBytes
-if ($draft.draft.draft_id -ne $draftReplay.draft.draft_id) { throw '초안 재전송 ID 불일치' }
-if (-not $draft.draft.mock -or -not $draft.draft.requires_confirmation) { throw '확인 전 mock 초안이어야 합니다.' }
-$draft | ConvertTo-Json -Depth 8
-```
-
-이 수동 절차는 별도 BE와 기존 AI mock 서버에 실제 소켓으로 연결하는 재현 안내이며 이번에는 실행하지 않았습니다.
-FE 브라우저 연동·실제 공급자 호출 성공을 뜻하지 않습니다. FE 연결은 FE 담당자의 API 수정 후 별도로 확인합니다.
+별도 BE 소켓을 수동 확인하려면 먼저 `GET http://127.0.0.1:8002/api/status`의 `mode=mock`을 확인하고,
+앞의 BE 실행 명령으로 서버를 시작한 뒤 `/docs`에서 시작 → 발언 → 일기 초안 순서로 가상 데이터를 전송합니다.
+위 스크립트 검증과 별도 BE 소켓·제품 FE 브라우저·실제 공급자 검증은 구분합니다.
+FE 연결은 FE 담당자의 API 수정 후 별도로 확인합니다.
 
 미검증/팀 합의 사항: 제품 FE 연결, 실제 모델의 품질·운영 timeout, 종료/재생성 UX,
 과거 버전 초안 표시·최종 일기 확인/수정/저장 API, 인증·소유권·TTL·DB 정책.
@@ -177,6 +183,46 @@ FE 브라우저 연동·실제 공급자 호출 성공을 뜻하지 않습니다
 `services/chat.py`는 후보 이력/AI 호출/상태 전이, `session_store.py`는 메모리 예약/저장,
 `clients/ai.py`는 기존 AI HTTP와 응답 검증을 담당합니다.
 
+### Supabase DB·Storage 마이그레이션 초안
+
+다음 SQL 2개는 Git 추적을 유지합니다. **미적용 상태이며 DB·버킷을 생성하거나 현재 API에 연결하지 않았습니다.**
+SQL 주석의 `docs/*.md`는 로컬 상세 문서 안내입니다. 새 clone에서도 필요한 공유 정보는 이 절에 정리합니다.
+
+| 파일 | 목적 |
+| --- | --- |
+| [20261107000100_create_member_diaries.sql](supabase/migrations/20261107000100_create_member_diaries.sql) | 테이블 3개, 제약·인덱스·권한·회원별 RLS |
+| [20261107000200_private_diary_storage_policies.sql](supabase/migrations/20261107000200_private_diary_storage_policies.sql) | 비공개 Storage 접근 정책 |
+
+`diaries`는 `auth.users.id` 기반 회원, 서울 기준 `date`, 날씨, 확인한 글/시각, 출처 세션·버전·요청,
+선택한 AI 초안 JSON을 보관합니다. `diary_messages`는 원본 role/text/0-based position을,
+`diary_assets`는 원본 그림·향후 만화 장면의 파일 키/MIME/크기/해상도/SHA-256을 보관합니다.
+회원·날짜당 한 권 고유 제약은 초기 후보이며 자식 복합 FK는 부모 회원까지 일치시킵니다.
+파일 바이트·base64·공개/서명 URL은 DB에 보관하지 않습니다.
+
+일반 회원은 `auth.uid()` 일치와 `is_anonymous='false'` 조건으로 본인 조회·추가만 허용합니다.
+타인 ID 지정, 미인증·익명 로그인, 일반 회원 수정·삭제와 만화 직접 추가는 차단합니다.
+직접 INSERT의 AI 결과 진위·실제 최종 확인 여부는 RLS만으로 보장하지 않으므로 BE 검증과 쓰기 경로 합의가 필요합니다.
+service_role은 RLS를 우회할 수 있으므로 서버에서 소유권을 검증하며 키를 FE에 노출하지 않습니다.
+실제 키·DB 비밀번호는 코드·SQL·문서·로그에 기록하지 않습니다.
+
+적용 전 검토 및 이후 개발 환경 검증 순서입니다. 아래 작업은 아직 수행하지 않았습니다.
+
+1. 회원/복수 아이 모델, 하루 한 권, 서울 날짜 경계·과거/미래 입력, 수정·삭제·탈퇴·원본 보존 기간을 합의합니다.
+2. 대상 프로젝트·DB 버전·백업·기존 이름 충돌·권한/RLS와 Auth 함수를 확인하고 로그인·세션 소유권·저장/복구를 구현합니다.
+3. 별도 개발 환경에서 `20261107000100_create_member_diaries.sql`을 먼저 검증·적용합니다.
+4. Storage API/Dashboard에서 `diary-private`을 **private (`public=false`)**로 준비합니다.
+   JPEG/PNG, 최대 10 MiB는 후보 설정입니다. 키는 `{user_id}/{diary_id}/{asset_kind}/{asset_id}.jpg` 또는 `.png`입니다.
+5. `20261107000200_private_diary_storage_policies.sql`을 검증·적용합니다. 본인 원본 새 업로드와
+   원본/만화 조회를 허용하고 덮어쓰기·이동·삭제를 제한합니다. 기존 넓은 정책과의 조합도 확인합니다.
+6. 가상 회원 A/B로 타인 접근·ID 위조·중복 날짜·수정/삭제·파일 실패·자정 경계를 검증한 뒤 실제 적용을 검토합니다.
+   service_role/SQL Editor만 사용한 검증으로 실제 회원 RLS 검증을 대신하지 않습니다.
+
+원본 업로드(`upsert=false`) 후 일기·대화·파일 참조를 DB 트랜잭션으로 묶는 저장 서비스는 미구현입니다.
+파일/DB 저장은 원자적이지 않으므로 영속 요청 키·지문·상태와 응답 유실/고아 파일 복구가 필요합니다.
+SQL만으로 필수 원본 실존·대화/출처 일관성·최종 확인을 보장하지 않습니다. FK는 RESTRICT이므로 탈퇴 전 정리 정책도 필요합니다.
+두 SQL은 각각 트랜잭션이며 버킷 준비까지 하나의 원자적 배포가 아닙니다. 후속 단계 실패 시 업로드 기능을 열지 않습니다.
+실제 RLS·Storage 동작은 미검증입니다. SQL 내용 변경·DB 실행·파일/테이블 삭제는 이 문서 정리 작업에 포함하지 않습니다.
+
 ### Git 작업 흐름
 
 변경 전에 `git status`와 현재 브랜치를 확인하고 기존 작업을 보존합니다.
@@ -186,5 +232,8 @@ FE 브라우저 연동·실제 공급자 호출 성공을 뜻하지 않습니다
 
 실제 환경변수 파일(`.env`, `.env.*`), 비밀키와 `.venv`는 Git에서 제외합니다.
 공유용 `.env.example`에는 비밀값 없이 변수 이름과 예시만 작성합니다.
-`AGENTS.md`는 각 PC의 `.git/info/exclude`에 `/AGENTS.md`를 등록해 로컬 전용으로 관리합니다.
-`PROJECT_STATUS.md`도 같은 방식으로 로컬 전용으로 유지하며 커밋하지 않습니다.
+Markdown은 `.gitignore`에서 루트 `README.md`만 추적 대상으로 남깁니다. 하위 폴더 README를 포함한
+다른 `.md` 문서는 로컬 전용이며 새 clone에 포함되지 않습니다. 기존 `docs/*.md`는 로컬 파일을 보존하고
+`git rm --cached`로 추적만 해제했습니다. 과거 커밋은 재작성하지 않습니다.
+`AGENTS.md`와 `PROJECT_STATUS.md`의 기존 `.git/info/exclude` 규칙도 유지하며 강제 추가하지 않습니다.
+`supabase/migrations/*.sql`은 계속 추적합니다.
