@@ -421,7 +421,9 @@ Publishable key(`sb_publishable_...`)는 사용자가 환경변수로 직접 전
 데이터 변경 없이 현재 fixture 전제를 먼저 확인하세요. 본문 문구·AI 프롬프트·모델·생성 품질 비교는 하지 않습니다.
 
 자동 테스트는 실제 BE 경로와 HTTPX 모의 Auth/DB로 판정·조회 경계·비밀정보 비노출을 검사합니다.
-실제 회원 로그인·원격 조회는 사용자가 위 명령을 실행하기 전까지 **미검증**입니다.
+2026-11-07 **사용자 직접 실행 보고: 실제 Supabase 연동 검사 12/12 성공, 종료 코드 0**.
+A/B 로그인, 본인 상세 200, 상대 상세 404, 월별 목록 격리, 미인증 401을 확인했습니다.
+에이전트가 실행한 결과와 구분하며 실제 쓰기 성공을 뜻하지 않습니다.
 배포된 HTTP 서버·브라우저/CORS·전체 DB 행과 RLS 정책·Storage·저장/RPC·동시성은 이 도구의 검증 범위 밖입니다.
 이 도구는 Auth 로그인으로 세션을 발급받지만 DB 데이터나 스키마를 변경하지 않습니다.
 
@@ -584,38 +586,186 @@ SQL `DETAIL` / 응답 `details`의 `IDEMPOTENCY_CONFLICT`·`DIARY_DATE_CONFLICT`
 `.env.example`에는 변수 이름/설명만 있으며 현재 사용자에게 실제 키 입력을 요청하지 않습니다.
 누락 시 기존 인증/대화/조회는 유지하고 신규 쓰기만 503입니다. 전체 앱 시작에 쓰기 키를 요구하지 않습니다.
 
-### 저장 기능의 추가 수동 검증 — 에이전트 미실행
+### RPC 트랜잭션 검증 준비 — DB 실행 전 사용자 검토 필수
 
-001·002·003 적용과 위 컬럼·인덱스·RPC·권한 확인은 사용자 수동 보고 기준 완료입니다.
-아래 1~3번은 신규 환경의 적용 절차 참고이며, 현재 프로젝트에 다시 적용하는 지시가 아닙니다.
-GET 검증만 수행할 때는 앞의 조회 전용 도구를 사용하며 아래 저장·RPC 검증은 실행하지 않습니다.
+001·002·003은 Production 적용 완료입니다. 기존 migration을 수정하거나 재적용하지 않습니다.
+아래 SQL은 **미실행 준비본**이며 실제 BE 영구 저장은 아직 미검증입니다.
+실제 Supabase DB 실행·영구 행 생성/삭제·Secret key 사용은 이번 작업에서 수행하지 않습니다.
 
-1. 대상 프로젝트·백업·migration 이력과 실제 `diaries`, `diary_messages`, `auth.users` 컬럼/제약을 대조합니다.
-   001·002 적용, 회원 SELECT 전용, RLS 활성 상태와 추가 trigger/정책 유무도 확인합니다.
-2. 폐기 가능한 로컬 Supabase에서 001·003을 먼저 적용하고
-   [tests/sql/verify_confirm_member_diary.sql](tests/sql/verify_confirm_member_diary.sql)을 실행합니다.
-   합성 회원/일기만 사용하고 마지막 ROLLBACK으로 정리합니다. 원격 프로젝트에서 실행하지 않습니다.
-   이 파일은 service_role 실행·일반 회원 RPC 금지·날짜/재전송 충돌·부모 INSERT 이후 메시지 실패 롤백을 확인하는 **미실행 검증본**입니다.
-3. 로컬 검증 후 사용자가 검토한 별도 절차로 원격 003만 하나의 트랜잭션으로 적용합니다.
-   pending migration 전체를 무조건 적용하지 않고 이름 충돌/기존 데이터/원격 스키마 차이를 먼저 확인합니다.
-   `has_function_privilege`로 anon/authenticated 실행 false, service_role true와 일반 회원 직접 쓰기 차단을 확인합니다.
-4. 서버 환경에 키를 주입한 뒤 BE `--workers 1`과 AI mock을 실행합니다. 가상 회원 A/B로 각각 로그인하고
-   본인 세션 → 발언 → 초안 → 확정(200) → 월별/상세 조회를 확인합니다. 기존 가상 일기와 같은 날이면 409가 정상입니다.
-   이를 피하려고 기존 데이터를 덮어쓰거나 삭제하지 않습니다. 별도 개발 프로젝트/빈 날짜를 준비합니다.
-5. 원본 대화의 role/position/text, 초안 JSON, 본문, 서울 날짜를 비교합니다. 같은 키/내용은 같은 ID,
-   날씨/초안/버전/세션 변경은 409, 다른 키의 같은 날 일기는 409, A/B 같은 키는 독립 처리인지 확인합니다.
-6. A→B/B→A 세션 저장은 404, 일기 상세도 404, 월별 목록은 본인만 확인합니다.
-   무토큰/무효/만료는 401이며 DB 쓰기 없음, 익명은 403인지 확인합니다.
-7. BE 재시작 뒤 월별/상세 조회와 같은 확정 요청 복구를 확인합니다. 미확정 세션은 404가 정상입니다.
-   DB 장애·키 누락 시 안전한 오류와 원문 비노출, 네트워크 응답 유실 뒤 같은 키로 결과 복구도 확인합니다.
-8. 회원 JWT로 직접 DB INSERT/UPDATE/DELETE와 RPC 호출 거절을 별도로 확인합니다.
-   관리자 권한으로 성공한 저장을 RLS 격리 성공으로 해석하지 않습니다.
+| 파일 | 용도와 실행 조건 |
+| --- | --- |
+| [review_confirm_member_diary.sql](tests/sql/review_confirm_member_diary.sql) | 읽기 전용 카탈로그 검토. 함수 정의·권한·RLS·제약·인덱스·기본값·트리거·규칙. 회원 데이터 행 조회 없음 |
+| [verify_confirm_member_diary.sql](tests/sql/verify_confirm_member_diary.sql) | 폐기 가능한 독립 로컬 Supabase 전용. 합성 Auth 회원 생성도 내부 롤백. `v_disposable_local=false` 기본 차단 |
+| [verify_confirm_member_diary_production.sql](tests/sql/verify_confirm_member_diary_production.sql) | 기존 가상 A/B 전용 원격 검증. `v_reviewed=false` 기본 차단. 사용자 검토 후에만 실행 |
 
-자동 테스트는 HTTPX 모의 RPC의 부분 실패/동시 요청/응답 유실·새 앱 생성 후 복구와 SQL의 권한/고유 제약을 검사합니다.
-2026-11-07 `pglast 8.7`: migration 003의 SQL 9문·PL/pgSQL 1개, 수동 검증본의 SQL 7문·PL/pgSQL 2개 파싱 통과.
-임시 폴더의 독립 파서 사용, 프로젝트 Python 의존성 변경 없음. SQL 선언의 충돌 3곳과 BE HTTP 오류 매핑 연결 테스트 포함.
-실제 SQL 구문 실행·PostgreSQL 롤백·원격 RLS/인증·Secret key 연동·브라우저 통합은 이번에 수행하지 않았습니다.
-Python 의존성 추가는 없습니다. 실제 DB 원자성과 권한은 위 로컬/사용자 수동 절차로 최종 확인해야 합니다.
+먼저 독립 로컬 DB를 검토합니다. 현재 환경은 `local-tools/supabase-cli/v3.0.0/supabase.exe`만 발견됐고,
+Docker·psql·supabase는 PATH에서 발견되지 않았습니다. 로컬 DB는 시작하거나 설치하지 않았습니다.
+[공식 로컬 개발 절차](https://supabase.com/docs/guides/local-development/cli/getting-started)의 Docker·CLI를
+사용자가 준비한 뒤, **새 빈 디렉터리·고유 project_id·미사용 포트**로 `supabase init`과 `supabase start`를 수행합니다.
+현재 BE의 사용자 `supabase/config.toml`·`.gitignore`와 연결 설정은 복사/수정하지 않습니다.
+원격 link·db push·원격 reset은 사용하지 않습니다. 기존 로컬 프로젝트의 db reset도 금지합니다.
+
+로컬 Studio의 주소가 CLI가 표시한 loopback 주소인지 확인하고, 로컬 SQL Editor에서 원본 001 → 003을 적용합니다.
+002는 Storage 버킷 정책이므로 RPC 전용 로컬 검사에는 불필요합니다. 전체 환경 검사에는 별도 버킷 준비 후 002도 필요합니다.
+`verify_confirm_member_diary.sql`의 로컬 확인 플래그를 사용자 사본에서 true로 바꾸고 파일 전체를 한 번에 실행합니다.
+예상 결과는 `LOCAL_RPC_SQL_CHECKS_PASSED`, 오류 없음, 마지막 `ROLLBACK`입니다.
+합성 UUID가 이미 있으면 중단하며 기존 계정을 삭제하지 않습니다.
+로컬 실행 환경을 준비할 수 없으면 **로컬 실행 미검증**으로 남기고, 원격으로 옮겨 실행하기 전에 그 한계까지 사용자 검토를 받습니다.
+
+원격 실행 전 검토 항목과 순서:
+
+1. 사용자가 파일 전체와 대상 프로젝트 `today-and-near`(`nnbmxtiouvsuszretahg`)·Production 표시·백업을 검토합니다.
+   다른 회원/아동 자료를 사용하지 않습니다. 기존 A/B의 알려진 가상 일기·계정·fixture는 보존합니다.
+2. 사용자가 읽기 전용 `review_confirm_member_diary.sql` 전체를 SQL Editor에서 한 번에 실행하고,
+   실제 정의를 001·003과 대조합니다. RPC 인수 9개·순서·uuid 반환·SECURITY INVOKER·빈 search_path를 확인합니다.
+   PUBLIC/anon/authenticated 실행 금지, service_role 허용과 일반 회원 두 테이블 INSERT 금지를 확인합니다.
+   함수 본문 MD5가 검증 SQL의 값과 같아야 합니다. 줄바꿈 CR만 정규화하며 공백 차이도 안전하게 중단합니다.
+   불일치를 피하려고 지문을 임의 교체하지 말고 먼저 정의 차이를 검토합니다.
+3. 두 테이블 기본값은 001의 UUID/now() 생성인지, 제약·인덱스·RLS는 예상과 같은지 확인합니다.
+   추가 트리거·쓰기 규칙·외부 호출·시퀀스 등 롤백 불가능한 부작용이 있으면 중단합니다.
+   스키마 변경 작업과 A/B를 사용하는 다른 저장·로그인 작업도 검사 동안 중지합니다.
+4. A `77e0ebce-127d-4bb4-84ef-8d89d6c06a90`, B `49df086e-a986-41ef-8e95-e8997ff270cc`가
+   모두 2026-11-07 가상 일기인지 확인합니다. SQL은 이 두 ID로만 회원을 정하고 서로 다른 활성 비익명 회원을 요구합니다.
+   테스트 날짜 `2035-01-02`·`2035-01-03`과 `rpc-proof-` 키가 A/B에서 미사용이어야 합니다.
+   이미 사용 중이면 삭제·수정 대신 중단하고 새 날짜/키를 검토합니다. SQL의 타임스탬프·날짜 단언도 함께 바꿔야 합니다.
+5. **위 항목에 대한 사용자 검토가 끝난 뒤**, 사용자 사본의 `v_reviewed`만 true로 바꿉니다.
+   SQL Editor 역할은 postgres로 설정하고, **BEGIN부터 마지막 ROLLBACK까지 파일 전체를 단 한 번에 실행**합니다.
+   부분 선택·문장별 실행·RPC 호출만 복사는 금지합니다. 이번 작업은 해당 실행을 승인하거나 대신 수행하지 않습니다.
+
+데이터 불변 경계는 다음과 같습니다.
+
+- 바깥 `BEGIN`과 마지막 `ROLLBACK`, 3초 잠금·30초 문장·60초 유휴 트랜잭션 제한을 사용합니다.
+  A/B advisory lock은 RPC와 같은 방식으로 정렬해서 잡습니다. 다른 회원의 행은 조회/변경하지 않습니다.
+- 모든 RPC 테스트 쓰기를 단일 내부 예외 블록에 넣고, 정상 검사 완료 후에도 전용 `ZV001`을 발생시켜 전부 취소합니다.
+  [PostgreSQL 예외 처리 규칙](https://www.postgresql.org/docs/current/plpgsql-control-structures.html#PLPGSQL-ERROR-TRAPPING)에
+  따라 해당 블록의 DB 변경이 되돌아갑니다. 예상 밖 오류·취소·검증 실패는 성공으로 삼키지 않으며 전체 문장이 실패합니다.
+  마지막 ROLLBACK이 실행되지 않아도 완료된 DO에 테스트 행이 남는 구조를 피합니다.
+- 내부 롤백 후 A/B diaries·diary_messages·diary_assets의 정렬된 전체 행을 전 스냅샷과 비교합니다.
+  Auth는 ID·역할·익명·삭제 상태만 비교하며 Auth INSERT/UPDATE/DELETE가 없습니다. 스냅샷은 메모리에서만 비교하고 출력하지 않습니다.
+  일기/원본 대화의 빈값 실패 뒤 부모·일부 메시지가 남지 않았는지도 별도로 비교합니다.
+- 마지막 결과 `RPC_SQL_CHECKS_PASSED`는 내부 쓰기 취소와 불변 비교가 모두 끝난 뒤에만 설정합니다.
+  결과 표식·오류 없음·최종 ROLLBACK을 함께 확인합니다. UI가 결과/NOTICE를 표시하지 않으면 성공 판정을 보류합니다.
+  에러 뒤 단순한 `Success. No rows returned`만으로 성공 처리하지 않습니다.
+  실패/연결 끊김에는 재실행하지 말고 같은 연결에서 가능하면 `ROLLBACK;`으로 종료합니다.
+  연결을 재사용할 수 없으면 종료/유휴 제한을 확인하고, 새 연결에서 A/B fixture와 `rpc-proof-` 잔여 행을 확인한 뒤 검토합니다.
+  잔여 행이 보이면 삭제하지 말고 중단합니다. 별도 연결에서 COMMIT하면 테스트를 복구할 수 있다는 가정은 금지합니다.
+
+실행 전후와 연결 끊김 후에는 아래 **읽기 전용 블록 전체**로 대상·잔여 행도 확인할 수 있습니다.
+기대값은 `test_members=2`, `known_fixtures=2`, `remaining_test_diaries=0`입니다.
+잔여 자식은 부모 FK로 연결되므로 테스트 부모가 없는 상태에서 독립적으로 남을 수 없습니다.
+이 확인은 내부 전 행 스냅샷 비교를 대신하지 않습니다. 회원 수/fixture 수 불일치나 잔여 행은 중단 조건입니다.
+
+```sql
+begin read only;
+with fixture as (
+    select id, user_id, diary_date from public.diaries
+    where id in ('77e0ebce-127d-4bb4-84ef-8d89d6c06a90',
+                 '49df086e-a986-41ef-8e95-e8997ff270cc')
+), members as (select distinct user_id from fixture)
+select (select count(*) from members) as test_members,
+    (select count(*) from fixture where diary_date = date '2026-11-07') as known_fixtures,
+    (select count(*) from public.diaries d where d.user_id in (select user_id from members)
+        and (d.diary_date in (date '2035-01-02', date '2035-01-03')
+            or d.source_client_request_id like 'rpc-proof-%')) as remaining_test_diaries;
+rollback;
+```
+
+| 검사 | 예상 결과 |
+| --- | --- |
+| anon/authenticated 직접 SQL 역할의 RPC 호출 | SQLSTATE 42501, 쓰기 없음 |
+| service_role 최초 RPC / 동일 요청 재전송 | uuid 반환 / 동일 uuid·원래 확정 시각·3개 메시지, 날짜 이동 없음 |
+| B의 같은 요청 키 | A와 다른 uuid, B 소유 |
+| 같은 키·다른 지문 | PT409 / DETAIL IDEMPOTENCY_CONFLICT / 요청 내용 불일치 |
+| 같은 날짜·다른 키 | PT409 / DETAIL DIARY_DATE_CONFLICT / 날짜 중복 |
+| null 회원·잘못된 지문/세션/키/버전/날씨/시각·잘못된 대화 구조/개수/순서/역할/child 부재 | 22023, 잔여 행 없음 |
+| 잘못된 초안 필수값 / 마지막 메시지 빈 본문 | 23514 / diaries_ai_draft_ck 또는 diary_messages_text_ck, 부모·대화 쓰기 모두 취소 |
+| 원본 보존 / 검사 종료 | position·role·공백/개행 포함 text·초안 JSON 동일 / A/B 기존 행 동일 |
+
+날짜 충돌은 사전 확인 경로를 실행합니다. 고유 제약 예외 분기·실제 동시 경쟁은 단일 연결 검사로 실행 검증하지 못합니다.
+RPC는 BE가 계산한 지문을 신뢰합니다. 같은 지문에 바뀐 초안/대화를 넣어도 재검증하는 계약이 아니며,
+SQL은 AI 출처·생성 품질을 새로 검증하지 않습니다. 기존 BE 초안 검증과 서버 전용 호출 경계를 유지합니다.
+SQL Editor의 `SET LOCAL ROLE`은 DB 권한·트랜잭션 검사입니다. 실제 회원 JWT/게이트웨이/PostgREST/Secret key HTTP는 별도 검사입니다.
+`PT409`의 실제 HTTP 409·JSON `details`는 다음 BE 단계에서 확인합니다.
+[PostgREST 공식 규칙](https://docs.postgrest.org/en/stable/references/errors.html#raise-errors-with-http-status-codes)상
+PTxyz는 HTTP xyz이며 BE는 POST·409·PT409·알려진 details 조합만 해당 충돌로 처리합니다.
+
+### 다음 실제 BE 저장 테스트 — RPC 검사 이후 별도 실행
+
+권장 환경은 **별도 HTTPS Supabase 개발 프로젝트와 전용 가상 회원 C/D**입니다.
+현재 BE 설정은 HTTPS origin·sb_publishable_/sb_secret_만 허용하므로 기본 HTTP 로컬 Supabase를 그대로 연결할 수 없습니다.
+로컬 PostgreSQL RPC 검사와 실제 BE HTTP 검사를 구분하며 이를 위해 설정 검증을 완화하지 않습니다.
+Production에서 하려면 별도 테스트 회원·현재 서울 날짜의 빈 슬롯·신규 영구 데이터 생성 범위를 다시 사용자 검토해야 합니다.
+2026-11-07 A/B에는 이미 일기가 있으므로 새 저장은 정상적으로 409입니다. 기존 A/B 삭제·덮어쓰기·기기 시각 변경은 금지합니다.
+
+1. RPC 검사 결과를 먼저 확인합니다. 격리 프로젝트에 001·002·003/버킷과 비익명 C/D를 별도 준비하고,
+   C/D의 현재 서울 날짜 목록이 비어 있는지 회원 JWT로 확인합니다. 계정/데이터 생성은 이번 작업에서 수행하지 않습니다.
+2. AI 담당자가 기존 mock 서버를 준비합니다. `/api/status`의 `mode=mock`을 확인하고 가상 대화만 사용합니다.
+   실모델 모드·상태 미확인 시 중단합니다. FE·AI 저장소나 `/api/chat`, `/api/diary` 계약을 바꾸지 않습니다.
+3. 새 BE 전용 PowerShell에서 아래 블록을 **후속 실행 승인 후에만** 사용합니다.
+   사용자 로컬에서 실제 키를 숨김 입력하며 Secret key는 BE 환경에만 둡니다. AI 프로세스 실행 셸과 분리합니다.
+   이 블록은 서버 시작만 하며 저장 요청은 다음 단계에서 사용자가 직접 전송합니다.
+
+```powershell
+& {
+    $storagePublicKey = $null
+    $storageSecretKey = $null
+    try {
+        $storageProjectUrl = Read-Host '격리 테스트 프로젝트 HTTPS origin'
+        if ($storageProjectUrl.TrimEnd('/') -eq 'https://nnbmxtiouvsuszretahg.supabase.co') {
+            throw '격리 테스트 프로젝트 필요'
+        }
+        $storageAiStatus = Invoke-RestMethod 'http://127.0.0.1:8002/api/status'
+        if ($storageAiStatus.mode -ne 'mock') { throw 'AI mock 상태 불일치' }
+        $env:SUPABASE_URL = $storageProjectUrl
+        $env:AI_BASE_URL = 'http://127.0.0.1:8002'
+        $storagePublicKey = Read-Host '격리 프로젝트 Publishable key (숨김)' -AsSecureString
+        $storageSecretKey = Read-Host '격리 프로젝트 BE Secret key (숨김)' -AsSecureString
+        $env:SUPABASE_PUBLISHABLE_KEY = [System.Net.NetworkCredential]::new('', $storagePublicKey).Password
+        $env:SUPABASE_SECRET_KEY = [System.Net.NetworkCredential]::new('', $storageSecretKey).Password
+        .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
+    }
+    finally {
+        Remove-Item Env:SUPABASE_SECRET_KEY, Env:SUPABASE_PUBLISHABLE_KEY, Env:SUPABASE_URL, Env:AI_BASE_URL -ErrorAction SilentlyContinue
+        if ($null -ne $storageSecretKey) { $storageSecretKey.Dispose() }
+        if ($null -ne $storagePublicKey) { $storagePublicKey.Dispose() }
+    }
+}
+```
+
+4. BE 루트에서 실행하며 `--reload`는 사용하지 않습니다. 브라우저 분리 프로필 C/D의 로컬 `/docs` Authorize에는
+   해당 회원 JWT만 입력합니다. Secret key를 Swagger/브라우저/FE/AI/채팅/명령 인수/로그/파일에 넣지 않습니다.
+   C/D 로그인도 해당 격리 프로젝트에서 수행합니다. `verify_mock_diary`는 가짜 Auth이므로 실제 저장 검사에 사용하지 않습니다.
+5. C: 시작 `POST /api/chat-sessions`에 `{}`와 새 `Idempotency-Key` → 201.
+   `/messages`에 `{"client_message_id":"storage-turn-1","text":"가상 인물이 공놀이한 이야기야."}` → 200.
+   `/diary-draft`에 `{"client_request_id":"storage-draft-1","history_revision":1}` → 200.
+   받은 session_id·draft_id와 원본 응답을 로컬 메모리에서만 사용합니다.
+   `/diaries`에 `{"client_request_id":"storage-confirm-1","history_revision":1,"draft_id":"<받은 draft_id>","weather":"sunny"}` → 200.
+   user_id/본문/대화/diary_date는 보내지 않습니다. AI 응답 문구나 생성 알고리즘에 맞춘 판정은 추가하지 않습니다.
+6. 응답 diary_id·서울 날짜·초안 JSON·확정 본문·position/role/text와 시작부터의 대화 전체(1회 발언이면 3개)를 비교합니다.
+   `GET /api/diaries?month=<저장 YYYY-MM>`과 `GET /api/diaries/{diary_id}` → 200, D의 C 상세는 404.
+   저장 요청 완전 동일 재전송 → 200·동일 ID. 같은 키의 weather 변경 → 409 IDEMPOTENCY_CONFLICT·retryable=false.
+   같은 초안의 다른 확정 키 → 409 DIARY_DATE_CONFLICT·retryable=false, 기존 행 유지.
+7. D도 별도 세션/대화/초안으로 같은 확정 키를 사용해 200·다른 ID를 확인합니다.
+   C↔D 상세·세션 저장은 양방향 404, 월별 목록은 본인만, 무토큰 GET/저장은 401입니다.
+   일반 회원의 RPC 직접 HTTP 호출은 Publishable key + 회원 JWT로 거절되는지 별도 확인합니다.
+   DB 역할 거절 `42501`과 HTTP 403을 예상하며 게이트웨이 401·다른 코드만으로 RPC 권한 확인을 대신하지 않습니다.
+   Secret key를 회원 JWT와 함께 직접 RPC에 보내지 않습니다.
+8. BE 중지 후 같은 블록으로 재시작하고 C/D 월별·상세가 그대로 200인지 확인합니다.
+   원래 session_id·확정 body 그대로 POST → 200·원래 ID 복구. 저장하지 않은 세션은 재시작 후 404입니다.
+   필요하면 쓰기 키 없이 읽기·이미 저장된 요청 복구도 확인합니다. 신규 저장은 키 누락 시 503입니다.
+9. timeout/응답 유실 시 성공·실패 판정을 보류하고 같은 회원·키·본문으로만 조회/명시적 재시도합니다.
+   새 키로 우회하거나 자동 재시도하지 않습니다. 오류 원문·토큰/키가 노출되면 중단합니다.
+   테스트 결과는 ID/본문/비밀값 없이 항목별 상태만 기록합니다. 신규 가상 fixture도 자동 삭제하지 않습니다.
+
+후속 HTTP 저장은 요청별 커밋이므로 SQL Editor의 ROLLBACK에 포함되지 않습니다.
+실제 Secret key HTTP·PostgREST schema cache·재시작 DB 복구·실제 동시성·Storage/브라우저 통합은 아직 미검증입니다.
+자동 테스트의 모의 HTTP 통과와 SQL 파싱은 이 항목의 실행 성공을 뜻하지 않습니다.
+
+2026-11-07 이번 준비 검증: BE `.venv` 전체 **467 passed**(`pytest -q -W error`), pip check·compileall 통과.
+기존 462개에 migration 불변·RPC 본문 지문·기본 차단·롤백 경계·fixture 일치 정적 검사 5개를 추가했습니다.
+기존 임시 `pglast 8.7`로 카탈로그 SQL 13문, 로컬 SQL 7문/PLpgSQL 1개,
+원격 SQL 8문/PLpgSQL 1개, 위 읽기 전용 SQL 예시 3문 파싱 통과. PowerShell 블록 10개 AST 파싱 통과.
+새 Python 의존성과 앱 동작 변경은 없습니다. 해당 구문을 DB나 실제 키로 실행한 결과는 아닙니다.
 
 2026-11-07 **사용자 수동 보고**: A/B 각각 diaries 1행·diary_messages 3행, 비익명 로그인·서로 다른 회원 ID,
 본인 조회·상대 조회 차단·알려진 가상 일기 ID 양방향 교차 조회·미인증 DB 거절 확인.
