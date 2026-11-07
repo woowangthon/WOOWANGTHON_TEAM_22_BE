@@ -6,6 +6,11 @@ FE → BE → 기존 AI HTTP 서버로 이어지는 최소 텍스트 대화·일
 [FE·BE API 계약](docs/CHAT_API_CONTRACT.md)은 **팀 합의 전 잠정 계약**입니다.
 실제 아동 데이터를 사용하지 마세요. 현재 구현에는 인증·DB·그림 저장·최종 일기 확인/저장·이미지 생성이 없습니다.
 
+회원별 그림일기의 [Supabase DB 스키마·RLS 초안](docs/DIARY_DB_SCHEMA.md)과
+[비공개 Storage 준비·접근 정책](docs/DIARY_STORAGE_POLICY.md)을 별도로 작성했습니다.
+`supabase/migrations/`의 SQL은 **미적용 검토용**이며 현재 API에 연결되어 있지 않습니다.
+적용 전 확인 순서와 사용자/날짜/원본 보존의 미정 사항은 두 문서를 확인하세요.
+
 ## 개발 환경
 
 - Windows / VS Code / PowerShell
