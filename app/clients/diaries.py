@@ -45,15 +45,21 @@ class DiaryRepository:
             raise AppError(401, "AUTHENTICATION_FAILED", "인증 실패")
         if not 200 <= response.status_code < 300:
             code = None
+            details = None
             try:
                 data = response.json()
-                code = data.get("code") if isinstance(data, dict) else None
+                if isinstance(data, dict):
+                    code = data.get("code")
+                    details = data.get("details")
             except ValueError:
                 pass
-            if method == "POST" and code == "PT409":
-                raise AppError(409, "IDEMPOTENCY_CONFLICT", "요청 내용 불일치")
-            if method == "POST" and code == "PT410":
-                raise AppError(409, "DIARY_DATE_CONFLICT", "해당 날짜 일기 존재")
+            if method == "POST" and response.status_code == 409 and code == "PT409":
+                # 요청 충돌 처리
+                if details == "IDEMPOTENCY_CONFLICT":
+                    raise AppError(409, "IDEMPOTENCY_CONFLICT", "요청 내용 불일치")
+                # 날짜 중복 확인
+                if details == "DIARY_DATE_CONFLICT":
+                    raise AppError(409, "DIARY_DATE_CONFLICT", "날짜 중복")
             if response.status_code == 429 or response.status_code >= 500:
                 raise storage_unavailable()
             raise AppError(503, "DIARY_STORAGE_FAILED", "저장소 처리 실패")

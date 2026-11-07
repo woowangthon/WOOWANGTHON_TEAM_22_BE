@@ -60,16 +60,19 @@ begin
         and d.confirmation_fingerprint is not null;
     if found then
         if v_existing.confirmation_fingerprint <> p_fingerprint then
-            raise exception using errcode = 'PT409', message = 'request conflict';
+            -- 요청 충돌 처리
+            raise exception using errcode = 'PT409', message = '요청 내용 불일치',
+                detail = 'IDEMPOTENCY_CONFLICT';
         end if;
         return v_existing.id;
     end if;
 
-    -- BE 확정 시각의 서울 날짜
+    -- 날짜 중복 확인
     v_date := (p_confirmed_at at time zone 'Asia/Seoul')::date;
     if exists (select 1 from public.diaries as d
                where d.user_id = p_user_id and d.diary_date = v_date) then
-        raise exception using errcode = 'PT410', message = 'date conflict';
+        raise exception using errcode = 'PT409', message = '날짜 중복',
+            detail = 'DIARY_DATE_CONFLICT';
     end if;
 
     -- 원본 대화 구조·순서 확인
@@ -116,7 +119,8 @@ exception when unique_violation then
     -- 예외 블록 전체 쓰기 롤백
     get stacked diagnostics v_constraint = constraint_name;
     if v_constraint = 'diaries_user_date_uq' then
-        raise exception using errcode = 'PT410', message = 'date conflict';
+        raise exception using errcode = 'PT409', message = '날짜 중복',
+            detail = 'DIARY_DATE_CONFLICT';
     end if;
     raise;
 end;

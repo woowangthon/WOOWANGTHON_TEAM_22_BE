@@ -463,8 +463,8 @@ Authorization: Bearer <회원 access token>
 | --- | --- | --- |
 | 404 | DIARY_DRAFT_NOT_FOUND | 해당 세션 초안 없음 / false |
 | 404 | DIARY_NOT_FOUND | 본인 일기 없음 / false |
-| 409 | IDEMPOTENCY_CONFLICT | 동일 확정 키의 요청 내용 불일치 / false |
-| 409 | DIARY_DATE_CONFLICT | 해당 회원·서울 날짜의 일기 존재 / false |
+| 409 | IDEMPOTENCY_CONFLICT | 요청 내용 불일치 / false |
+| 409 | DIARY_DATE_CONFLICT | 날짜 중복 / false |
 | 409 | HISTORY_REVISION_CONFLICT | 현재 이력/초안 버전 불일치 / false |
 | 409 | SESSION_BUSY | 같은 세션의 처리 진행 중 / true |
 | 422 | VALIDATION_ERROR | 월·UUID·날씨·본문 필드 형식 오류 / false |
@@ -512,6 +512,12 @@ RPC는 비익명 활성 회원 확인 → 회원별 트랜잭션 advisory lock �
 초안 본문과 원본 메시지 INSERT를 한 트랜잭션으로 수행합니다. 메시지 실패 시 부모도 롤백되며 부분 저장을 재사용하지 않습니다.
 실패를 삼키거나 DB 저장을 자동 재시도하지 않습니다. 세션 busy는 취소/실패에도 해제합니다.
 
+충돌 오류: SQLSTATE `PT409` → PostgREST HTTP 409 → BE HTTP 409.
+공식 [오류 규칙](https://docs.postgrest.org/en/v16/references/errors.html)에 따른 `PT410` 제거.
+SQL `DETAIL` / 응답 `details`의 `IDEMPOTENCY_CONFLICT`·`DIARY_DATE_CONFLICT`로 내부 구분.
+사용자 메시지는 각각 `요청 내용 불일치`·`날짜 중복`, `retryable=false`.
+날짜 사전 확인과 고유 제약 예외 모두 동일 처리. 알 수 없는 충돌 상세는 저장소 오류로 처리.
+
 서버의 `SUPABASE_SECRET_KEY`는 배포 환경/secret manager에서 주입합니다. 실제 키를 채팅·코드·FE·AI·로그에 넣지 않습니다.
 `.env.example`에는 변수 이름/설명만 있으며 현재 사용자에게 실제 키 입력을 요청하지 않습니다.
 누락 시 기존 인증/대화/조회는 유지하고 신규 쓰기만 503입니다. 전체 앱 시작에 쓰기 키를 요구하지 않습니다.
@@ -540,6 +546,8 @@ RPC는 비익명 활성 회원 확인 → 회원별 트랜잭션 advisory lock �
    관리자 권한으로 성공한 저장을 RLS 격리 성공으로 해석하지 않습니다.
 
 자동 테스트는 HTTPX 모의 RPC의 부분 실패/동시 요청/응답 유실·새 앱 생성 후 복구와 SQL의 권한/고유 제약을 검사합니다.
+2026-11-07 `pglast 8.7`: migration 003의 SQL 9문·PL/pgSQL 1개, 수동 검증본의 SQL 7문·PL/pgSQL 2개 파싱 통과.
+임시 폴더의 독립 파서 사용, 프로젝트 Python 의존성 변경 없음. SQL 선언의 충돌 3곳과 BE HTTP 오류 매핑 연결 테스트 포함.
 실제 SQL 구문 실행·PostgreSQL 롤백·원격 RLS/인증·Secret key 연동·브라우저 통합은 이번에 수행하지 않았습니다.
 Python 의존성 추가는 없습니다. 실제 DB 원자성과 권한은 위 로컬/사용자 수동 절차로 최종 확인해야 합니다.
 

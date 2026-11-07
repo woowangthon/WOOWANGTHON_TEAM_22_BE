@@ -33,6 +33,8 @@ declare
     v_id uuid;
     v_repeated uuid;
     v_rejected boolean;
+    v_detail text;
+    v_message text;
 begin
     v_id := public.confirm_member_diary(v_member, v_session, 'local-proof-1', 1,
         repeat('a', 64), null, '2035-01-01 15:00:00+00', v_draft, v_messages);
@@ -50,7 +52,8 @@ begin
         perform public.confirm_member_diary(v_member, v_session, 'local-proof-1', 1,
             repeat('b', 64), null, '2035-01-01 15:00:00+00', v_draft, v_messages);
     exception when sqlstate 'PT409' then
-        v_rejected := true;
+        get stacked diagnostics v_detail = pg_exception_detail, v_message = message_text;
+        v_rejected := v_detail = 'IDEMPOTENCY_CONFLICT' and v_message = '요청 내용 불일치';
     end;
     if not v_rejected then raise exception 'request conflict missing'; end if;
 
@@ -58,8 +61,9 @@ begin
     begin
         perform public.confirm_member_diary(v_member, v_session, 'local-proof-2', 1,
             repeat('c', 64), null, '2035-01-01 15:00:00+00', v_draft, v_messages);
-    exception when sqlstate 'PT410' then
-        v_rejected := true;
+    exception when sqlstate 'PT409' then
+        get stacked diagnostics v_detail = pg_exception_detail, v_message = message_text;
+        v_rejected := v_detail = 'DIARY_DATE_CONFLICT' and v_message = '날짜 중복';
     end;
     if not v_rejected then raise exception 'date conflict missing'; end if;
 

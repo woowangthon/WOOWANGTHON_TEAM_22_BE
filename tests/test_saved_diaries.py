@@ -1,20 +1,29 @@
 import asyncio
 import copy
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
+from app.clients.diaries import DiaryRepository
 from app.config import Settings
 from app.diary_schemas import ConfirmDiaryRequest
+from app.errors import AppError
 from app.main import create_app
 from tests.conftest import FakeAI, FakeAuth, MEMBER_A, MEMBER_B, TEST_PUBLISHABLE_KEY
 
 FAKE_SECRET = "sb_secret_fake_test_only"
+RPC_CONFLICTS = re.findall(
+    r"raise exception using errcode = '(PT409)', message = '([^']+)',\s*detail = '([^']+)';",
+    (Path(__file__).resolve().parents[1] / "supabase" / "migrations"
+     / "20261107000300_confirm_member_diary.sql").read_text(encoding="utf-8"),
+)
 
 
 class FakeDatabase:
@@ -81,14 +90,18 @@ class FakeDatabase:
             if (row["user_id"] == payload["p_user_id"]
                     and row["source_client_request_id"] == payload["p_client_request_id"]):
                 if row["confirmation_fingerprint"] != payload["p_fingerprint"]:
-                    return httpx.Response(409, json={"code": "PT409"})
+                    return httpx.Response(409, json={
+                        "code": "PT409", "details": "IDEMPOTENCY_CONFLICT",
+                    })
                 return httpx.Response(200, json=row["id"])
         diary_date = datetime.fromisoformat(payload["p_confirmed_at"]).astimezone(
             timezone(timedelta(hours=9)),
         ).date().isoformat()
         if any(row["user_id"] == payload["p_user_id"] and row["diary_date"] == diary_date
                for row in self.diaries.values()):
-            return httpx.Response(410, json={"code": "PT410"})
+            return httpx.Response(409, json={
+                "code": "PT409", "details": "DIARY_DATE_CONFLICT",
+            })
         diary_id = str(uuid4())
         row = {
             "id": diary_id, "user_id": payload["p_user_id"], "diary_date": diary_date,
@@ -235,6 +248,54 @@ async def test_same_day_conflict(saved_api):
                      409, "DIARY_DATE_CONFLICT")
         assert len(db.diaries) == 1
         assert len(db.messages) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("sqlstate,message,details", RPC_CONFLICTS)
+async def test_rpc_conflicts_from_sql_return_api_409(saved_api, sqlstate, message, details):
+    db = FakeDatabase()
+
+    async def handler(request):
+        if request.method == "POST":
+            return httpx.Response(int(sqlstate[2:]), json={
+                "code": sqlstate, "message": message, "details": details, "hint": None,
+            })
+        return await db(request)
+
+    async with saved_api(db=handler) as (client, app, _, ai):
+        url, body, _ = await prepare(client)
+        response = await client.post(url, json=body)
+        assert_error(response, 409, details)
+        assert response.json()["error"] == {
+            "code": details, "message": {
+                "IDEMPOTENCY_CONFLICT": "요청 내용 불일치",
+                "DIARY_DATE_CONFLICT": "날짜 중복",
+            }[details], "retryable": False,
+        }
+        assert not app.state.chat_service.store.sessions[url.split("/")[3]].busy
+        assert not db.diaries and not db.messages
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("payload", [
+    {"code": "PT409"},
+    {"code": "PT409", "details": "unknown", "message": "날짜 중복"},
+    {"code": "PT409", "details": None},
+    {"code": "PT409", "details": ["DIARY_DATE_CONFLICT"]},
+    {"code": "PT409", "details": {"code": "DIARY_DATE_CONFLICT"}},
+    {"code": "23505", "details": "DIARY_DATE_CONFLICT"},
+    {"code": "PT410", "details": "DIARY_DATE_CONFLICT"},
+])
+async def test_unknown_rpc_conflict_fails_safely(payload):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(409, json=payload)),
+        base_url="http://db.test",
+    ) as writer:
+        repository = DiaryRepository(None, writer, 1)
+        with pytest.raises(AppError) as error:
+            await repository.save({})
+        assert error.value.status == 503
+        assert error.value.code == "DIARY_STORAGE_FAILED"
 
 
 @pytest.mark.anyio

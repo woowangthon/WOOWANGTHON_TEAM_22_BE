@@ -27,6 +27,9 @@ def test_rpc_roles_and_no_member_write_grants():
     assert re.search(r"grant execute on function " + signature + r" to service_role", sql)
     assert "security invoker" in sql and "security definer" not in sql
     assert "set search_path = ''" in sql
+    assert "grant usage on schema public, auth to service_role;" in sql
+    assert "grant select (id, is_anonymous, role, deleted_at) on auth.users to service_role;" in sql
+    assert "grant select, insert on public.diaries, public.diary_messages to service_role;" in sql
     for statement in re.findall(r"grant\b[^;]+;", sql):
         assert re.search(r"to service_role\s*;", statement)
     assert not re.search(r"(?:create|alter|drop)\s+policy|disable\s+row\s+level\s+security", sql)
@@ -40,7 +43,11 @@ def test_rpc_transaction_and_persistent_idempotency_guards():
     assert "pg_catalog.pg_advisory_xact_lock" in sql
     assert sql.index("pg_catalog.pg_advisory_xact_lock") < sql.index("insert into public.diaries")
     assert "v_existing.confirmation_fingerprint <> p_fingerprint" in sql
-    assert "errcode = 'pt409'" in sql and "errcode = 'pt410'" in sql
+    assert "errcode = 'pt410'" not in sql
+    assert sql.count("errcode = 'pt409', message = '날짜 중복',") == 2
+    assert sql.count("detail = 'diary_date_conflict'") == 2
+    assert "errcode = 'pt409', message = '요청 내용 불일치'," in sql
+    assert sql.count("detail = 'idempotency_conflict'") == 1
     assert "insert into public.diaries" in sql and "insert into public.diary_messages" in sql
     assert "p_ai_draft ->> 'text'" in sql
     assert "(p_confirmed_at at time zone 'asia/seoul')::date" in sql
@@ -49,3 +56,9 @@ def test_rpc_transaction_and_persistent_idempotency_guards():
     assert not re.search(r"\b(commit|rollback)\b", sql)
     assert not re.search(r"exception\s+when\s+others|when\s+.+then\s+null", sql)
     assert "exception when unique_violation" in sql and "raise;" in sql
+    handler = sql.split("exception when unique_violation then", 1)[1]
+    assert re.search(
+        r"if v_constraint = 'diaries_user_date_uq' then\s*"
+        r"raise exception using errcode = 'pt409', message = '날짜 중복',\s*"
+        r"detail = 'diary_date_conflict';", handler,
+    )
