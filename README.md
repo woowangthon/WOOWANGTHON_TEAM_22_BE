@@ -589,8 +589,10 @@ SQL `DETAIL` / 응답 `details`의 `IDEMPOTENCY_CONFLICT`·`DIARY_DATE_CONFLICT`
 ### RPC 트랜잭션 검증 준비 — DB 실행 전 사용자 검토 필수
 
 001·002·003은 Production 적용 완료입니다. 기존 migration을 수정하거나 재적용하지 않습니다.
-아래 SQL은 **미실행 준비본**이며 실제 BE 영구 저장은 아직 미검증입니다.
-실제 Supabase DB 실행·영구 행 생성/삭제·Secret key 사용은 이번 작업에서 수행하지 않습니다.
+2026-11-07 최신 사용자 보고: 실제 PostgreSQL RPC 실행·롤백 검증 통과,
+A/B 일기 2개·대화 6개 보존, 검증용 추가 일기 잔여 0개입니다. 에이전트 직접 실행과 구분합니다.
+아래는 기존 검증 절차 참고입니다. 실제 BE Secret key HTTP 영구 저장도 아래 회원 C 절차로
+사용자가 직접 실행해 성공했으며 에이전트가 재실행하지 않습니다.
 
 | 파일 | 용도와 실행 조건 |
 | --- | --- |
@@ -689,79 +691,87 @@ SQL Editor의 `SET LOCAL ROLE`은 DB 권한·트랜잭션 검사입니다. 실�
 [PostgREST 공식 규칙](https://docs.postgrest.org/en/stable/references/errors.html#raise-errors-with-http-status-codes)상
 PTxyz는 HTTP xyz이며 BE는 POST·409·PT409·알려진 details 조합만 해당 충돌로 처리합니다.
 
-### 다음 실제 BE 저장 테스트 — RPC 검사 이후 별도 실행
+### 회원 C 실제 BE 영구 저장 검증 — 사용자 로컬 실행
 
-권장 환경은 **별도 HTTPS Supabase 개발 프로젝트와 전용 가상 회원 C/D**입니다.
-현재 BE 설정은 HTTPS origin·sb_publishable_/sb_secret_만 허용하므로 기본 HTTP 로컬 Supabase를 그대로 연결할 수 없습니다.
-로컬 PostgreSQL RPC 검사와 실제 BE HTTP 검사를 구분하며 이를 위해 설정 검증을 완화하지 않습니다.
-Production에서 하려면 별도 테스트 회원·현재 서울 날짜의 빈 슬롯·신규 영구 데이터 생성 범위를 다시 사용자 검토해야 합니다.
-2026-11-07 A/B에는 이미 일기가 있으므로 새 저장은 정상적으로 409입니다. 기존 A/B 삭제·덮어쓰기·기기 시각 변경은 금지합니다.
+2026-11-07 최신 **사용자 보고**: migration 001·002·003 적용·RPC 권한 확인,
+실제 PostgreSQL RPC 실행·롤백 검증 통과. 기존 A/B 일기 2개·대화 6개 보존,
+RPC 검증용 추가 일기 잔여 0개.
+2026-11-08 최신 **사용자 수동 실행 보고**: `scripts.verify_diary_storage --save-member-c`
+10단계 전부 성공·종료 코드 0. AI HTTP mock, 실제 Supabase Auth 로그인·BE 확정 저장 RPC·
+월별/상세 조회·새 BE 앱 인스턴스 재조회 성공. 저장된 가상 일기 ID:
+`a73ce25b-581c-47fe-bc9b-ba6b9741a460`. C의 저장 일기와 기존 A/B 데이터는 보존합니다.
+에이전트는 실제 회원 로그인이나 원격 DB 쓰기를 수행하지 않았습니다.
 
-1. RPC 검사 결과를 먼저 확인합니다. 격리 프로젝트에 001·002·003/버킷과 비익명 C/D를 별도 준비하고,
-   C/D의 현재 서울 날짜 목록이 비어 있는지 회원 JWT로 확인합니다. 계정/데이터 생성은 이번 작업에서 수행하지 않습니다.
-2. AI 담당자가 기존 mock 서버를 준비합니다. `/api/status`의 `mode=mock`을 확인하고 가상 대화만 사용합니다.
-   실모델 모드·상태 미확인 시 중단합니다. FE·AI 저장소나 `/api/chat`, `/api/diary` 계약을 바꾸지 않습니다.
-3. 새 BE 전용 PowerShell에서 아래 블록을 **후속 실행 승인 후에만** 사용합니다.
-   사용자 로컬에서 실제 키를 숨김 입력하며 Secret key는 BE 환경에만 둡니다. AI 프로세스 실행 셸과 분리합니다.
-   이 블록은 서버 시작만 하며 저장 요청은 다음 단계에서 사용자가 직접 전송합니다.
+[scripts/verify_diary_storage.py](scripts/verify_diary_storage.py)는 기존 조회 도구의
+로그인·비익명 회원 검사와 BE의 `Settings`·`create_app`·라우트·저장소를 재사용합니다.
+`verify_mock_diary.py`의 Auth는 가짜이므로 실제 저장용으로 실행하지 않습니다.
+BE/AI 서버를 별도 실행할 필요가 없습니다.
+
+| 구간 | 실행 방식 |
+| --- | --- |
+| Supabase 비밀번호 로그인·Auth `/user` | 실제 today-and-near HTTPS |
+| BE 세션·발언·초안·확정·월별·상세 API | 로컬 ASGI로 기존 앱 실행 |
+| AI `/api/chat`·`/api/diary` | 기존 계약의 HTTPX mock 응답, 실모델·AI 네트워크 없음 |
+| 확정 저장 | 실제 서버 Secret key로 기존 `confirm_member_diary` RPC 최대 1회 |
+| 달력 목록·상세·원본 대화 | 실제 Publishable key + 회원 JWT로 GET |
+| 재시작 후 조회 | 첫 앱 lifespan 종료 후 새 앱·빈 SessionStore·새 클라이언트로 상세 GET |
+
+**아래 블록은 실제 영구 저장을 수행합니다. 사용자가 BE 루트의 전용 PowerShell에서 직접 실행하세요.**
+사용자가 만든 가상 테스트 회원 C만 입력합니다. A/B·실제 아동 계정은 입력하지 않습니다.
+현재 Asia/Seoul 날짜의 C 일기가 있거나 설정·인증·예상 응답이 잘못되면 저장 전에 중단합니다.
+알려진 A/B 일기를 본인으로 읽을 수 있는 계정도 차단합니다.
+서울 날짜가 실행 중 바뀌면 쓰기를 중단하며 기존 행 삭제·날짜 변경·자동 재시도는 없습니다.
 
 ```powershell
 & {
     $storagePublicKey = $null
     $storageSecretKey = $null
     try {
-        $storageProjectUrl = Read-Host '격리 테스트 프로젝트 HTTPS origin'
-        if ($storageProjectUrl.TrimEnd('/') -eq 'https://nnbmxtiouvsuszretahg.supabase.co') {
-            throw '격리 테스트 프로젝트 필요'
-        }
-        $storageAiStatus = Invoke-RestMethod 'http://127.0.0.1:8002/api/status'
-        if ($storageAiStatus.mode -ne 'mock') { throw 'AI mock 상태 불일치' }
-        $env:SUPABASE_URL = $storageProjectUrl
-        $env:AI_BASE_URL = 'http://127.0.0.1:8002'
-        $storagePublicKey = Read-Host '격리 프로젝트 Publishable key (숨김)' -AsSecureString
-        $storageSecretKey = Read-Host '격리 프로젝트 BE Secret key (숨김)' -AsSecureString
+        $env:SUPABASE_URL = 'https://nnbmxtiouvsuszretahg.supabase.co'
+        $storagePublicKey = Read-Host 'today-and-near Publishable key (숨김)' -AsSecureString
+        $storageSecretKey = Read-Host 'today-and-near BE Secret key (숨김)' -AsSecureString
         $env:SUPABASE_PUBLISHABLE_KEY = [System.Net.NetworkCredential]::new('', $storagePublicKey).Password
         $env:SUPABASE_SECRET_KEY = [System.Net.NetworkCredential]::new('', $storageSecretKey).Password
-        .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
+        .\.venv\Scripts\python.exe -m scripts.verify_diary_storage --save-member-c
+        if ($LASTEXITCODE -ne 0) { throw '검증 실패: 추가 저장 없이 항목별 결과 확인' }
     }
     finally {
-        Remove-Item Env:SUPABASE_SECRET_KEY, Env:SUPABASE_PUBLISHABLE_KEY, Env:SUPABASE_URL, Env:AI_BASE_URL -ErrorAction SilentlyContinue
+        Remove-Item Env:SUPABASE_SECRET_KEY, Env:SUPABASE_PUBLISHABLE_KEY, Env:SUPABASE_URL -ErrorAction SilentlyContinue
         if ($null -ne $storageSecretKey) { $storageSecretKey.Dispose() }
         if ($null -ne $storagePublicKey) { $storagePublicKey.Dispose() }
     }
 }
 ```
 
-4. BE 루트에서 실행하며 `--reload`는 사용하지 않습니다. 브라우저 분리 프로필 C/D의 로컬 `/docs` Authorize에는
-   해당 회원 JWT만 입력합니다. Secret key를 Swagger/브라우저/FE/AI/채팅/명령 인수/로그/파일에 넣지 않습니다.
-   C/D 로그인도 해당 격리 프로젝트에서 수행합니다. `verify_mock_diary`는 가짜 Auth이므로 실제 저장 검사에 사용하지 않습니다.
-5. C: 시작 `POST /api/chat-sessions`에 `{}`와 새 `Idempotency-Key` → 201.
-   `/messages`에 `{"client_message_id":"storage-turn-1","text":"가상 인물이 공놀이한 이야기야."}` → 200.
-   `/diary-draft`에 `{"client_request_id":"storage-draft-1","history_revision":1}` → 200.
-   받은 session_id·draft_id와 원본 응답을 로컬 메모리에서만 사용합니다.
-   `/diaries`에 `{"client_request_id":"storage-confirm-1","history_revision":1,"draft_id":"<받은 draft_id>","weather":"sunny"}` → 200.
-   user_id/본문/대화/diary_date는 보내지 않습니다. AI 응답 문구나 생성 알고리즘에 맞춘 판정은 추가하지 않습니다.
-6. 응답 diary_id·서울 날짜·초안 JSON·확정 본문·position/role/text와 시작부터의 대화 전체(1회 발언이면 3개)를 비교합니다.
-   `GET /api/diaries?month=<저장 YYYY-MM>`과 `GET /api/diaries/{diary_id}` → 200, D의 C 상세는 404.
-   저장 요청 완전 동일 재전송 → 200·동일 ID. 같은 키의 weather 변경 → 409 IDEMPOTENCY_CONFLICT·retryable=false.
-   같은 초안의 다른 확정 키 → 409 DIARY_DATE_CONFLICT·retryable=false, 기존 행 유지.
-7. D도 별도 세션/대화/초안으로 같은 확정 키를 사용해 200·다른 ID를 확인합니다.
-   C↔D 상세·세션 저장은 양방향 404, 월별 목록은 본인만, 무토큰 GET/저장은 401입니다.
-   일반 회원의 RPC 직접 HTTP 호출은 Publishable key + 회원 JWT로 거절되는지 별도 확인합니다.
-   DB 역할 거절 `42501`과 HTTP 403을 예상하며 게이트웨이 401·다른 코드만으로 RPC 권한 확인을 대신하지 않습니다.
-   Secret key를 회원 JWT와 함께 직접 RPC에 보내지 않습니다.
-8. BE 중지 후 같은 블록으로 재시작하고 C/D 월별·상세가 그대로 200인지 확인합니다.
-   원래 session_id·확정 body 그대로 POST → 200·원래 ID 복구. 저장하지 않은 세션은 재시작 후 404입니다.
-   필요하면 쓰기 키 없이 읽기·이미 저장된 요청 복구도 확인합니다. 신규 저장은 키 누락 시 503입니다.
-9. timeout/응답 유실 시 성공·실패 판정을 보류하고 같은 회원·키·본문으로만 조회/명시적 재시도합니다.
-   새 키로 우회하거나 자동 재시도하지 않습니다. 오류 원문·토큰/키가 노출되면 중단합니다.
-   테스트 결과는 ID/본문/비밀값 없이 항목별 상태만 기록합니다. 신규 가상 fixture도 자동 삭제하지 않습니다.
+Python에서 C 이메일·비밀번호를 모두 숨김 입력합니다. 대화형 터미널만 허용하며 숨김 입력 불가 시 중단합니다.
+이메일·비밀번호를 환경변수/명령 인수/파일에 넣지 않습니다.
+`sb_secret_` 키는 서버 전용이며 JWT가 아닙니다.
+[Supabase 공식 API key 안내](https://supabase.com/docs/guides/getting-started/api-keys)에 따라
+기존 `app/main.py`·`app/clients/diaries.py`는 저장 RPC에 `apikey: sb_secret_...`만 전송하고,
+Auth·GET에는 `apikey: sb_publishable_...`와 회원 `Authorization: Bearer <JWT>`를 사용합니다.
+Secret key 누락·형식 오류는 로그인 전 중단하고, 원격에서 거절된 키도 추가 INSERT 없이 실패합니다.
 
-후속 HTTP 저장은 요청별 커밋이므로 SQL Editor의 ROLLBACK에 포함되지 않습니다.
-실제 Secret key HTTP·PostgREST schema cache·재시작 DB 복구·실제 동시성·Storage/브라우저 통합은 아직 미검증입니다.
-자동 테스트의 모의 HTTP 통과와 SQL 파싱은 이 항목의 실행 성공을 뜻하지 않습니다.
+세션 생성 → 가상 발언 1회 → mock 초안 → 확정 저장 → 월별 목록·상세 → 새 앱 상세 순서로 검사합니다.
+저장 응답의 오늘 날짜·초안·확정 본문·원본 대화 3개의 position/role/text와 GET 결과를 메모리에서 비교합니다.
+AI 생성 문구를 저장 조건으로 사용하지 않으며 FE·AI 계약, 기존 app 코드·migration은 변경하지 않습니다.
+첫 앱과 새 앱 사이에 프로세스 자체를 다시 띄우지는 않으므로 OS 프로세스 재시작·배포 서버·브라우저 검증은 범위 밖입니다.
 
-2026-11-07 이번 준비 검증: BE `.venv` 전체 **467 passed**(`pytest -q -W error`), pip check·compileall 통과.
+항목별 성공/실패/미실행과 확인된 일기 ID만 출력합니다. 전체 성공은 종료 0, 중단·실패는 1입니다.
+본문·대화·이메일·비밀번호·토큰·키·예외 원문은 출력하거나 파일에 저장하지 않습니다.
+RPC 전송 후 timeout/응답 오류는 이미 저장됐을 수 있으므로 추가 저장 없이 C 목록·상세를 조회하세요.
+성공 데이터는 그대로 남습니다. 삭제는 별도 명시 승인이 필요합니다.
+Python 자식 프로세스와 PowerShell 부모 셸의 사용한 Supabase 환경변수를 각각 종료 시 정리합니다.
+
+자동 테스트는 원격 연결 없이 가짜 계정·DB로 실행합니다. 실제 C 저장 성공을 의미하지 않습니다.
+이번 준비 검증: 기존 467개 + 신규 안전 검사 17개 = **484 passed** (
+`pytest -q -W error`), pip check·compileall·diff 검사 통과.
+README PowerShell 11개 블록 구문 검사 통과. 실행 블록을 실제 키로 실행한 결과는 아닙니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q -W error tests/test_verify_diary_storage.py
+```
+
+2026-11-07 이전 SQL 준비 검증: BE `.venv` 전체 **467 passed**(`pytest -q -W error`), pip check·compileall 통과.
 기존 462개에 migration 불변·RPC 본문 지문·기본 차단·롤백 경계·fixture 일치 정적 검사 5개를 추가했습니다.
 기존 임시 `pglast 8.7`로 카탈로그 SQL 13문, 로컬 SQL 7문/PLpgSQL 1개,
 원격 SQL 8문/PLpgSQL 1개, 위 읽기 전용 SQL 예시 3문 파싱 통과. PowerShell 블록 10개 AST 파싱 통과.
