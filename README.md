@@ -5,9 +5,12 @@
 FE → BE → 기존 AI HTTP 서버로 이어지는 최소 텍스트 대화·일기 초안 서버입니다.
 아래 FE·BE API 계약은 **팀 합의 전 잠정 계약**입니다.
 Supabase 비익명 회원 토큰 인증과 회원별 세션·초안 소유권 검사 지원. 실제 아동 데이터 사용 금지.
-확정 일기·원본 대화의 DB 저장과 월별/상세 조회 구현. 그림 저장·이미지 생성·일기 수정은 미구현.
+확정 일기·원본 대화 DB 저장, 월별/상세 조회, 그림 원본 업로드·비공개 Storage 연동 구현.
+AI 이미지 생성·일기 수정은 미구현.
 
-회원별 그림일기 SQL 001·002·003은 2026-11-07 사용자 확인 기준 실제 Supabase 적용 완료.
+회원별 그림일기 SQL 001·002·003·004는 2026-11-08 **사용자 수동 확인 기준**
+Supabase `today-and-near` Production 적용 완료. `migration list --remote`의 로컬·원격 4개 일치도 사용자 보고 기준입니다.
+회원 C 일기 저장·조회 성공은 사용자 보고이며, 실제 그림 업로드·Storage 조회는 아직 미검증입니다.
 스키마·보안 요약과 적용 전 확인 순서는 아래에 있습니다.
 
 ## 개발 환경
@@ -782,13 +785,11 @@ README PowerShell 11개 블록 구문 검사 통과. 실행 블록을 실제 키
 diary_assets는 양쪽 0행으로 격리 미완료이며 종료 코드 2는 미검증 자산 데이터 때문입니다.
 이전 전부 0행 결과는 과거 기록입니다. 위 결과는 본 에이전트가 직접 실행한 검증이 아닙니다.
 
-### 그림 원본 업로드 후속 작업
+### 그림 원본 업로드 후속 검증
 
-실제 JPEG/PNG 디코딩·크기/픽셀/해시 검증과 서버가 만든 회원/일기/자산 경로를 먼저 구현합니다.
-비공개 Storage `upsert=false` 업로드, DB 자산 참조의 영속 요청 상태, 실패/응답 유실 시 고아 파일 복구를 설계합니다.
-DB와 Storage는 같은 트랜잭션으로 묶이지 않으므로 재시도·정리 상태가 필요합니다.
-자산이 있는 A/B의 실제 조회 격리·회원 직접 업로드 차단·서명 URL 수명도 별도 검증합니다.
-공유 세션 저장소를 구현하기 전까지 미확정 대화는 단일 worker 메모리 한계를 유지합니다.
+JPEG/PNG 검사·서버 생성 경로·비공개 Storage·DB pending/ready 복구는 구현된 상태입니다.
+아래 회원 C 검증 도구는 기존 C 일기에 가상 PNG를 최대 1회 업로드하는 사용자 실행 전용 도구입니다.
+실제 RLS·Storage 및 5분 만료·장애 복구 검증은 자동 모의 테스트와 구분합니다.
 
 ### Git 작업 흐름
 
@@ -805,7 +806,7 @@ Markdown은 `.gitignore`에서 루트 `README.md`만 추적 대상으로 남깁�
 `AGENTS.md`와 `PROJECT_STATUS.md`의 기존 `.git/info/exclude` 규칙도 유지하며 강제 추가하지 않습니다.
 `supabase/migrations/*.sql`은 계속 추적합니다.
 
-## 그림 원본 업로드·조회 — FE 제안 계약 (팀 합의 전)
+## 그림 원본 업로드·조회 — 현재 BE 구현 계약
 
 구현 API는 `POST /api/diaries/{diary_id}/drawing`과 기존
 `GET /api/diaries/{diary_id}`입니다. 먼저 아래 기존 확정 저장을 성공시킨 뒤 반환된
@@ -917,7 +918,8 @@ Pillow verify·재개방 load·픽셀 검사 후 제한된 스레드에서 정�
 multipart 전체는 파일 상한+64 KiB에서 차단하고 파일 읽기도 10 MiB+1로 제한합니다.
 일기 존재·소유권 확인은 파일 파싱과 Storage 작업보다 먼저 수행합니다.
 
-신규 `supabase/migrations/20261108000400_diary_drawing_upload.sql`은 **로컬 미적용 준비본**입니다.
+`supabase/migrations/20261108000400_diary_drawing_upload.sql`은
+2026-11-08 **사용자 수동 보고 기준 Production 적용 완료**입니다. Codex의 직접 원격 확인은 없습니다.
 001·002·003은 변경하지 않았습니다. 기존 자산은 `upload_status=ready` 기본값으로 보존하고,
 `updated_at`과 서버 전용 `reserve_diary_drawing`·`complete_diary_drawing` RPC를 추가합니다.
 두 RPC는 SECURITY INVOKER, 빈 search_path, service_role 전용 EXECUTE입니다.
@@ -943,23 +945,88 @@ multipart 전체는 파일 상한+64 KiB에서 차단하고 파일 읽기도 10 
 Storage 객체는 SQL INSERT/DELETE하지 않습니다. 서명 발급은 Publishable key+소유 회원 JWT로
 추가 RLS 검사를 받으며 업로드/복구용 파일 GET만 서버 Secret key를 사용합니다.
 
-### 실제 적용 전·최소 수동 검증
+### 기존 회원 C 그림 실연동 검증 — 사용자 직접 실행 전용
 
-이번 작업은 원격 DB/Storage 변경·실제 업로드·회원 C 저장 검증 재실행을 하지 않았습니다.
-004 적용 전에는 새 코드의 자산 SELECT가 실패하므로 004 적용과 BE 배포 순서를 조정해야 합니다.
-읽기 전용 앱에서도 그림 URL 발급에는 Publishable key+회원 JWT만 필요합니다.
+Codex는 실제 로그인·원격 Auth/RPC/Storage 요청을 실행하지 않았습니다.
+001·002·003·004 Production 적용과 C 저장·조회 성공은 **사용자 수동 확인**으로만 기록합니다.
+실제 그림 업로드 성공은 아래 도구의 사용자 실행 결과가 오기 전까지 **미검증**입니다.
 
-1. 운영 담당자가 실제 `diary_assets` 컬럼/제약·001/002/003 적용 이력과 버킷 private/JPEG·PNG/10 MiB를
-   로컬 스키마와 대조하고, 백업·004 검토 후 승인된 환경에 **004만** 적용합니다.
-2. RPC의 service_role EXECUTE·authenticated/anon 거절, 회원 테이블 INSERT/UPDATE/DELETE 차단,
-   기존 SELECT RLS와 Storage 직접 쓰기 차단 유지 여부를 확인합니다.
-3. 별도 가상 테스트 회원/일기로 PNG·JPEG 업로드 200, 실제 PNG 객체·DB 메타데이터·pending→ready 확인.
-   A/B·저장된 C 일기는 수정/삭제하지 않습니다. C 가상 일기 ID
-   `a73ce25b-581c-47fe-bc9b-ba6b9741a460` 보존, 기존 저장 검증 스크립트 재실행 금지입니다.
-4. 동일 Blob 재전송·브라우저 응답 유실·BE 재시작 후 동일 자산 ID, 다른 Blob 409,
-   다른 회원 업로드/상세 404·서명 미발급, 잘못된 파일 422/상한 초과 413을 확인합니다.
-5. URL 표시·5분 경과 후 상세 GET 재발급, 업로드/DB 완료 장애 후 pending 복구를 확인합니다.
-   이 단계는 자동 MockTransport 통과와 별개이며 현재 실제 PostgreSQL/RLS/Storage/FE 검증은 미실행입니다.
+BE 저장소 루트에서 실행합니다. 상위 `오늘,그리고` 폴더에서는 먼저
+`Set-Location -LiteralPath '.\WOOWANGTHON_TEAM_22_BE'`를 실행합니다.
+기존 C 일기 `a73ce25b-581c-47fe-bc9b-ba6b9741a460`만 사용하며 새 회원·일기를 만들지 않습니다.
+기존 일기 저장 도구 `scripts.verify_diary_storage --save-member-c`는 재실행하지 않습니다.
+
+```powershell
+& {
+    $drawingPublicKey = $null
+    $drawingSecretKey = $null
+    try {
+        $env:SUPABASE_URL = 'https://nnbmxtiouvsuszretahg.supabase.co'
+        $drawingPublicKey = Read-Host 'today-and-near Publishable key (숨김)' -AsSecureString
+        $drawingSecretKey = Read-Host 'today-and-near Secret key (숨김)' -AsSecureString
+        $env:SUPABASE_PUBLISHABLE_KEY = [System.Net.NetworkCredential]::new('', $drawingPublicKey).Password
+        $env:SUPABASE_SECRET_KEY = [System.Net.NetworkCredential]::new('', $drawingSecretKey).Password
+        .\.venv\Scripts\python.exe -m scripts.verify_drawing_storage --upload-member-c-once
+        if ($LASTEXITCODE -ne 0) { throw '그림 검증 실패: 재실행 전 기존 자산·시도 기록 확인' }
+    }
+    finally {
+        Remove-Item Env:SUPABASE_SECRET_KEY, Env:SUPABASE_PUBLISHABLE_KEY, Env:SUPABASE_URL -ErrorAction SilentlyContinue
+        if ($null -ne $drawingSecretKey) { $drawingSecretKey.Dispose() }
+        if ($null -ne $drawingPublicKey) { $drawingPublicKey.Dispose() }
+    }
+}
+```
+
+숨김 입력 순서: Publishable key → Secret key → 회원 C 이메일 → 회원 C 비밀번호.
+마지막 두 값은 Python `getpass` 입력이며 명령행·환경변수·파일에 저장하지 않습니다.
+정확한 명시 옵션·대화형 터미널·설정이 없으면 입력/로그인 전에 중단합니다.
+Python 자식과 PowerShell 부모 셸의 Supabase 환경변수는 종료 시 각각 정리합니다.
+
+BE 요청은 서버 포트 없이 `ASGITransport`로 실행합니다. AI는 호출 차단용 `MockTransport`이며
+대화·초안 생성 자체가 없습니다. **사용자 실행 시 Supabase Auth 로그인·회원 검증·DB GET·
+예약/완료 RPC·Storage 업로드·서명 발급·다운로드는 실제 네트워크 요청**입니다.
+자동 테스트에서만 가짜 계정과 `MockTransport`를 주입합니다.
+
+검사 순서: C 로그인 → C 소유권 → A/B 상세 404 → 기존 원본 자산 확인 → C 상세 →
+고정 8×8 체크 PNG 생성 → 기존 업로드 POST → ready 메타데이터 → 상세 → 새 BE 앱 상세 →
+임시 URL 다운로드·PNG 바이트/해시/픽셀 비교입니다. 회원/일기/자산 경로도 메모리에서 대조합니다.
+새 앱은 Secret key 없이 조회하며 기존 C 본문·대화·초안·날짜 등의 불변도 비교합니다.
+프로세스 재시작·FE 브라우저·실제 300초 대기 후 만료 검증은 포함하지 않습니다.
+
+**전체 11항목 성공·종료 코드 0·일기 ID와 자산 ID 출력**이 성공 기준입니다.
+키·인증정보·서명 URL·메타데이터 값·이미지 원문·일기 본문·예외 원문은 출력하지 않습니다.
+항목 상태와 ID, 실행 방식 및 재실행 금지 안내만 출력합니다.
+
+안전 경계:
+
+- 기존 original_drawing이 `ready` 또는 `pending`이면 해당 상태·자산 ID 출력 후 종료 1.
+  업로드 POST·서명 발급·다운로드 없이 중단합니다.
+- PNG 입력은 고정 픽셀과 무압축 DEFLATE로 바이트까지 결정적입니다. 입력 SHA-256은
+  `129e47c486d5da00d28ab55ccdc61792891bf6b2f9fd667729c0a8fb4119a347`입니다.
+  실제 저장 PNG는 기존 BE 정규화를 거치므로 입력 파일 해시와 구분합니다.
+- 업로드 직전에 `.drawing-verification/<C 일기 ID>.attempt`를 배타 생성·flush/fsync합니다.
+  기존 기록이 있으면 전송을 막고 성공·실패 모두 기록을 보존합니다. Git에서는 제외합니다.
+- BE 업로드 POST는 최대 1회, 원격 예약 RPC·객체 POST·완료 RPC도 각각 최대 1회입니다.
+  전송 직전에 횟수를 소진하며 timeout·응답 유실·객체 충돌 시 자동 재시도/복구 GET이 없습니다.
+- 실제 대상 프로젝트·회원·C 일기·생성 PNG·자산 경로·upsert=false를 검사합니다.
+  Auth 로그인 외 쓰기는 해당 그림의 예약·객체 업로드·완료·회원 서명 발급만 허용합니다.
+  새 회원/일기, 기존 일기/대화 변경, PUT/PATCH/DELETE, 추가 SQL/migration 작업은 없습니다.
+
+**원격 쓰기 시도 후 실패·응답 유실·로컬 시도 기록 존재·기존 ready/pending이면 재실행 금지**입니다.
+쓰기 전 설정/로그인 오류로 자산·기록이 전혀 생기지 않은 경우에만 원인을 수정한 뒤 실행 가능합니다.
+시도 기록을 지우거나 다른 clone/PC로 우회하면 로컬 보호가 사라집니다. 기록을 삭제하지 마세요.
+별도 PC·FE·다른 도구와 동시에 업로드하지 마세요. 원격 원본 1개 제약과 로컬 기록은
+서로 다른 PC의 전체 HTTP 시도 횟수까지 통합하지 않습니다.
+
+복구가 필요하면 실행 결과의 일기/자산 ID를 보존하고, 추가 쓰기 없이 원격 자산 상태를 먼저 확인합니다.
+ready는 상세 GET으로 재조회하고, pending/상태 불명은 별도 복구 작업으로 분리합니다.
+동일 Blob 복구는 이 도구의 `pattern_png()` 입력과 같은 BE/Pillow 정규화 환경을 사용해
+원격 metadata와 비교한 뒤 기존 업로드 API의 동일 Blob 복구 절차를 검토합니다.
+이 도구의 보호 기록 삭제·자동 복구·객체 임의 삭제·추가 Production SQL 실행은 금지합니다.
+
+자동 검증: BE `.venv` 기존 511개 확인 후 검증 도구 안전 경계 모의 테스트 23개 추가.
+최종 `pytest -q -W error`: **534 passed**. pip check·compileall·diff 검사와
+PowerShell 12개 블록 구문 검사 통과. 실제 원격 업로드 결과와는 별개입니다.
 
 AI `/api/chat`·`/api/diary` 필수 요청·응답 계약은 유지합니다. 프롬프트·기억·질문 품질·정리 모델·
 표현·페이지 구분은 계약 내에서 AI 담당자가 변경할 수 있으며, 그림 저장은 문장 내용에 의존하지 않습니다.
