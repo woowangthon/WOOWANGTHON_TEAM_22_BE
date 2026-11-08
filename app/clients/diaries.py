@@ -26,6 +26,7 @@ class DiaryRepository:
         self.reader = reader
         self.writer = writer
         self.timeout_seconds = timeout_seconds
+        self.drawings = None
 
     async def _request(self, method: str, path: str, token: str | None = None,
                        **kwargs):
@@ -54,6 +55,8 @@ class DiaryRepository:
             except ValueError:
                 pass
             if method == "POST" and response.status_code == 409 and code == "PT409":
+                if details == "DRAWING_CONFLICT":
+                    raise AppError(409, "DRAWING_ALREADY_EXISTS", "이미 저장된 그림")
                 # 요청 충돌 처리
                 if details == "IDEMPOTENCY_CONFLICT":
                     raise AppError(409, "IDEMPOTENCY_CONFLICT", "요청 내용 불일치")
@@ -63,6 +66,8 @@ class DiaryRepository:
             if response.status_code == 429 or response.status_code >= 500:
                 raise storage_unavailable()
             raise AppError(503, "DIARY_STORAGE_FAILED", "저장소 처리 실패")
+        if response.status_code == 204:
+            return None
         try:
             return response.json()
         except ValueError:
@@ -97,7 +102,7 @@ class DiaryRepository:
         except (ValueError, TypeError, AttributeError):
             raise invalid_response() from None
 
-    async def detail(self, owner_id: UUID, token: str, diary_id: UUID) -> DiaryDetail:
+    async def owned_diary(self, owner_id: UUID, token: str, diary_id: UUID):
         params = {"user_id": f"eq.{owner_id}", "id": f"eq.{diary_id}",
                   "select": DETAIL_COLUMNS, "limit": "2"}
         rows = await self._rows("/rest/v1/diaries", token, params)
@@ -105,18 +110,26 @@ class DiaryRepository:
             raise AppError(404, "DIARY_NOT_FOUND", "일기 없음")
         if len(rows) != 1:
             raise invalid_response()
+        if rows[0].get("id") != str(diary_id):
+            raise invalid_response()
+        return rows[0]
+
+    async def detail(self, owner_id: UUID, token: str, diary_id: UUID) -> DiaryDetail:
+        row = await self.owned_diary(owner_id, token, diary_id)
         messages = await self._rows("/rest/v1/diary_messages", token, {
             "user_id": f"eq.{owner_id}", "diary_id": f"eq.{diary_id}",
             "select": "position,role,text", "order": "position.asc", "limit": "60",
         })
         try:
-            row = rows[0]
+            assets = (await self.drawings.assets(owner_id, token, diary_id)
+                      if self.drawings is not None else [])
             return DiaryDetail.model_validate({
                 "diary_id": row["id"],
                 **{key: row[key] for key in (
                     "diary_date", "weather", "confirmed_text", "confirmed_at", "ai_draft",
                 )},
                 "messages": [SavedMessage.model_validate(item) for item in messages],
+                "assets": assets, "imageUrl": assets[0].imageUrl if assets else None,
             }, strict=False)
         except (ValidationError, KeyError, TypeError):
             raise invalid_response() from None

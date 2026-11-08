@@ -804,3 +804,164 @@ Markdown은 `.gitignore`에서 루트 `README.md`만 추적 대상으로 남깁�
 `git rm --cached`로 추적만 해제했습니다. 과거 커밋은 재작성하지 않습니다.
 `AGENTS.md`와 `PROJECT_STATUS.md`의 기존 `.git/info/exclude` 규칙도 유지하며 강제 추가하지 않습니다.
 `supabase/migrations/*.sql`은 계속 추적합니다.
+
+## 그림 원본 업로드·조회 — FE 제안 계약 (팀 합의 전)
+
+구현 API는 `POST /api/diaries/{diary_id}/drawing`과 기존
+`GET /api/diaries/{diary_id}`입니다. 먼저 아래 기존 확정 저장을 성공시킨 뒤 반환된
+`diary_id`에 그림을 업로드합니다. 두 요청 모두 회원 `Authorization: Bearer <JWT>` 필수입니다.
+회원 ID·저장 경로·자산 ID는 FE에서 정하지 않습니다. 본문·날짜·AI 문구도 업로드에 보내지 않습니다.
+
+### FE 요청과 응답
+
+1. `POST /api/chat-sessions/{session_id}/diaries`, `Content-Type: application/json`
+
+```json
+{
+  "client_request_id": "confirm-unique-1",
+  "history_revision": 1,
+  "draft_id": "draft_0123456789abcdef0123456789abcdef",
+  "weather": "sunny"
+}
+```
+
+기존 성공 JSON의 `diary_id`, `diary_date`, `weather`, `confirmed_text`, `confirmed_at`,
+`ai_draft`, `messages`, `imageUrl`, `assets`를 유지합니다. 최초 그림이 없으면
+`imageUrl: null`, `assets: []`입니다. 기존 확정 저장의 재시도에는 동일 요청 키·본문을 사용합니다.
+
+2. `POST /api/diaries/{diary_id}/drawing`, `multipart/form-data`, 파일 필드 **`file`**.
+입력 JPEG/PNG 최대 **10 MiB (10,485,760바이트)**, 가로/세로 각각 **8,192픽셀 이하**,
+전체 **16,000,000픽셀 이하**입니다. 애니메이션·빈 파일·손상 파일·다른 형식은 거절합니다.
+파일명·확장자·선언 MIME과 무관하게 실제 디코딩 결과로 검사합니다.
+
+```javascript
+// FE 연동 예시 (팀 합의 전)
+const form = new FormData();
+form.append("file", canvasBlob, "drawing.png");
+const response = await fetch(`${beBase}/api/diaries/${diaryId}/drawing`, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${memberToken}` },
+  body: form,
+});
+```
+
+브라우저가 multipart boundary를 설정하므로 `Content-Type` 헤더를 수동 지정하지 않습니다.
+추가 `user_id`·`storage_key` 값은 사용하지 않습니다.
+성공은 최초·동일 파일 재요청 모두 **200**이며 아래는 예시 값입니다.
+
+```json
+{
+  "diary_id": "44444444-4444-4444-8444-444444444444",
+  "asset": {
+    "asset_id": "55555555-5555-4555-8555-555555555555",
+    "asset_kind": "original_drawing",
+    "mime_type": "image/png",
+    "byte_size": 12048,
+    "width": 1024,
+    "height": 768,
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "imageUrl": "https://<project>.supabase.co/storage/v1/object/sign/diary-private/<server-path>?token=<temporary-secret>",
+    "expires_at": "2026-11-08T03:05:00Z"
+  }
+}
+```
+
+서명 URL은 DB에 저장하지 않습니다. `imageUrl`·토큰·회원 JWT·키·그림·일기 본문을
+콘솔·서버/프록시 접근 로그·분석 도구에 남기지 않습니다. 서명 URL을 아는 사람은
+유효기간 중 열 수 있으므로 FE 외부 공유·영구 캐시·브라우저 저장소 보관을 피합니다.
+서버 실행 시 기존 `--no-access-log` 설정을 유지합니다.
+
+3. 상세 GET 성공 응답의 `assets`에는 위 `asset`과 같은 DTO가 들어가고,
+최상위 `imageUrl`은 `original_drawing`의 URL입니다. 기존 필드·원본 대화·AI 초안은 유지합니다.
+그림 없음/업로드 대기는 `imageUrl: null`, `assets: []`로 표시합니다.
+각 URL의 수명은 **300초**이며 `expires_at`은 보수적인 만료 예상 시각입니다.
+만료나 이미지 로딩 실패 시 회원 인증으로 상세 GET을 다시 호출해 URL을 교체합니다.
+다른 회원·존재하지 않는 일기는 동일한 `404 DIARY_NOT_FOUND`, URL 발급 없음입니다.
+원본은 `asset_kind=original_drawing`; 향후 `comic_scene`와 구분하며 이번 API는 만화를 반환하지 않습니다.
+
+### FE 재시도·화면 흐름
+
+일기 확정과 그림 업로드가 모두 200인 뒤 완료 화면으로 이동하는 흐름을 제안합니다.
+업로드 실패·timeout·응답 유실 시 **canvas/Blob과 diary_id를 보존**하고,
+같은 일기에 같은 Blob으로 명시적 재시도합니다. 새 일기·새 그림으로 우회하지 않습니다.
+일기 저장을 다시 시작하거나 canvas를 초기화하지 않도록 FE 작업을 요청합니다.
+앱을 닫으면 메모리 Blob은 사라질 수 있으므로 장기 재시도 보관은 별도 FE 합의가 필요합니다.
+
+업로드는 정규화된 **실제 저장 PNG 바이트 SHA-256·크기·해상도·MIME**를 비교합니다.
+동일 결과는 같은 자산 ID를 반환하고, 다른 결과는 `409 DRAWING_ALREADY_EXISTS`로 차단합니다.
+원본 교체·삭제 API는 없습니다. 409는 자동 재시도하지 않고 기존 상세를 확인합니다.
+입력 JPEG도 디코딩한 픽셀을 PNG로 무손실 저장하며 EXIF 회전을 적용하고 메타데이터를 제거합니다.
+ICC 프로파일이 있으면 sRGB로 색상을 변환한 뒤 프로파일을 제거합니다.
+입력 인코딩 바이트 보관을 뜻하지 않으며, 정규화 출력이 10 MiB를 넘을 때도 413입니다.
+
+| HTTP | 코드 | 메시지·대응 |
+| --- | --- | --- |
+| 401 | 기존 인증 코드 | 로그인 갱신 |
+| 404 | DIARY_NOT_FOUND | 일기 없음·타 회원 동일 처리 |
+| 413 | DRAWING_TOO_LARGE / DRAWING_DIMENSIONS_EXCEEDED | 그림 크기 초과·파일/픽셀 축소 |
+| 422 | DRAWING_INVALID_IMAGE | 그림 형식 오류·정상 JPEG/PNG 재선택 |
+| 409 | DRAWING_ALREADY_EXISTS | 이미 저장된 그림·기존 상세 확인 |
+| 503 | DRAWING_STORAGE_UNAVAILABLE | 그림 저장 실패·동일 Blob 재시도 |
+| 503 | DRAWING_READ_UNAVAILABLE | 이미지 조회 실패·상세 GET 재시도 |
+| 502/503 | 기존 DIARY_STORAGE_* | DB 오류·설정/응답 확인 후 동일 Blob 재시도 |
+
+공통 오류는 기존 `{"error":{"code":"...","message":"...","retryable":true},"request_id":"req_..."}`입니다.
+DB 미설정/잘못된 응답은 기존 `retryable=false`가 유지되므로 운영 설정 확인을 우선합니다.
+인프라 장애와 응답 유실에서 새 파일로 자동 변경하지 않습니다.
+
+### Storage·DB 상태와 복구
+
+기존 비공개 `diary-private` 버킷과 001의 `diary_assets` 제약을 사용합니다.
+서버 생성 경로: `{회원 UUID}/{일기 UUID}/original_drawing/{자산 UUID}.png`.
+Pillow verify·재개방 load·픽셀 검사 후 제한된 스레드에서 정규화합니다(앱당 동시 디코딩 2개).
+multipart 전체는 파일 상한+64 KiB에서 차단하고 파일 읽기도 10 MiB+1로 제한합니다.
+일기 존재·소유권 확인은 파일 파싱과 Storage 작업보다 먼저 수행합니다.
+
+신규 `supabase/migrations/20261108000400_diary_drawing_upload.sql`은 **로컬 미적용 준비본**입니다.
+001·002·003은 변경하지 않았습니다. 기존 자산은 `upload_status=ready` 기본값으로 보존하고,
+`updated_at`과 서버 전용 `reserve_diary_drawing`·`complete_diary_drawing` RPC를 추가합니다.
+두 RPC는 SECURITY INVOKER, 빈 search_path, service_role 전용 EXECUTE입니다.
+기존 회원 SELECT RLS·회원 직접 쓰기 차단·Storage 정책을 유지합니다.
+
+| 단계/장애 | 남는 상태와 복구 |
+| --- | --- |
+| 예약 RPC 실패·응답 유실 | Storage 요청 없음. 행이 생겼어도 같은 파일 재요청으로 같은 예약 복구 |
+| 예약 성공 | 일기별 잠금과 기존 고유 제약으로 원본 1개 pending 기록·서버 UUID 고정 |
+| 업로드 실패·응답 유실 | pending 보존. 같은 경로에 upsert=false 재요청 |
+| 객체 이미 존재 | Storage API GET 스트림의 실제 바이트 크기·SHA-256 비교 후 동일할 때만 완료 |
+| 다른 객체 충돌 | 덮어쓰기·삭제·ready 전환 없음. 운영 점검 필요 |
+| 업로드 후 DB 완료 실패 | 파일은 pending 행으로 추적. 같은 파일 재시도로 기존 객체 검증 후 완료 |
+| DB 완료 후 응답/URL 발급 실패 | ready 보존. 재요청은 추가 업로드 없이 같은 자산과 새 서명 URL 반환 |
+
+파일 전에 DB 예약을 확정하므로 업로드된 객체는 DB에서 추적할 수 있습니다.
+요청 실패 시 자동 삭제하지 않습니다. DB 결과가 불명확한 상태에서 삭제하면 정상 자산도 잃을 수 있습니다.
+**pending에는 자동 TTL/삭제가 없습니다.** 원본 교체도 차단하므로 같은 Blob 재시도가 우선입니다.
+원본을 잃었거나 복구가 장기간 불가하면 쓰기를 중단한 운영 창에서 정확한 회원/일기/자산/경로를
+점검하고, ready가 아님을 재확인한 뒤 Storage API로 해당 객체의 삭제/부재를 확정합니다.
+그 다음에만 같은 pending 행을 조건부 삭제합니다. Storage 삭제가 불명확하면 DB 행을 보존합니다.
+운영 정리는 별도 명시 승인과 백업 후 수행하며 현재 코드에는 정리 API/배치가 없습니다.
+Storage 객체는 SQL INSERT/DELETE하지 않습니다. 서명 발급은 Publishable key+소유 회원 JWT로
+추가 RLS 검사를 받으며 업로드/복구용 파일 GET만 서버 Secret key를 사용합니다.
+
+### 실제 적용 전·최소 수동 검증
+
+이번 작업은 원격 DB/Storage 변경·실제 업로드·회원 C 저장 검증 재실행을 하지 않았습니다.
+004 적용 전에는 새 코드의 자산 SELECT가 실패하므로 004 적용과 BE 배포 순서를 조정해야 합니다.
+읽기 전용 앱에서도 그림 URL 발급에는 Publishable key+회원 JWT만 필요합니다.
+
+1. 운영 담당자가 실제 `diary_assets` 컬럼/제약·001/002/003 적용 이력과 버킷 private/JPEG·PNG/10 MiB를
+   로컬 스키마와 대조하고, 백업·004 검토 후 승인된 환경에 **004만** 적용합니다.
+2. RPC의 service_role EXECUTE·authenticated/anon 거절, 회원 테이블 INSERT/UPDATE/DELETE 차단,
+   기존 SELECT RLS와 Storage 직접 쓰기 차단 유지 여부를 확인합니다.
+3. 별도 가상 테스트 회원/일기로 PNG·JPEG 업로드 200, 실제 PNG 객체·DB 메타데이터·pending→ready 확인.
+   A/B·저장된 C 일기는 수정/삭제하지 않습니다. C 가상 일기 ID
+   `a73ce25b-581c-47fe-bc9b-ba6b9741a460` 보존, 기존 저장 검증 스크립트 재실행 금지입니다.
+4. 동일 Blob 재전송·브라우저 응답 유실·BE 재시작 후 동일 자산 ID, 다른 Blob 409,
+   다른 회원 업로드/상세 404·서명 미발급, 잘못된 파일 422/상한 초과 413을 확인합니다.
+5. URL 표시·5분 경과 후 상세 GET 재발급, 업로드/DB 완료 장애 후 pending 복구를 확인합니다.
+   이 단계는 자동 MockTransport 통과와 별개이며 현재 실제 PostgreSQL/RLS/Storage/FE 검증은 미실행입니다.
+
+AI `/api/chat`·`/api/diary` 필수 요청·응답 계약은 유지합니다. 프롬프트·기억·질문 품질·정리 모델·
+표현·페이지 구분은 계약 내에서 AI 담당자가 변경할 수 있으며, 그림 저장은 문장 내용에 의존하지 않습니다.
+미래 만화는 기존 `comic_scene` 종류로 확장 가능하지만 이번에 만화 API를 확정/구현하지 않았습니다.
+FE·AI 저장소 변경은 없습니다.

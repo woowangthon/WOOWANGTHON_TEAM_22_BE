@@ -48,6 +48,7 @@ class ReadOnlyTransport(httpx.AsyncBaseTransport):
         url = request.url
         allowed_get = request.method == "GET" and url.path in {
             "/auth/v1/user", "/rest/v1/diaries", "/rest/v1/diary_messages",
+            "/rest/v1/diary_assets",
         }
         allowed_login = (
             self.login and request.method == "POST" and url.path == "/auth/v1/token"

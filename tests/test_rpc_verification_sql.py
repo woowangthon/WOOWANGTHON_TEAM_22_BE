@@ -12,7 +12,12 @@ LOCAL = SQL_DIR / "verify_confirm_member_diary.sql"
 
 
 def test_all_applied_migrations_preserved():
-    for path in sorted((ROOT / "supabase/migrations").glob("*.sql")):
+    applied = subprocess.check_output(
+        ["git", "ls-tree", "--name-only", "b7e1335", "supabase/migrations/"], cwd=ROOT,
+    ).decode().splitlines()
+    assert len(applied) == 3
+    for name in applied:
+        path = ROOT / name
         original = subprocess.check_output(
             ["git", "show", f"b7e1335:supabase/migrations/{path.name}"], cwd=ROOT,
         ).replace(b"\r\n", b"\n")

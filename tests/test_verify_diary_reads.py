@@ -80,9 +80,10 @@ async def test_real_app_routes_auth_and_repository_reused_without_writes():
     assert len(checks) == 12 and all(check.passed for check in checks)
     assert len([request for request in fake.requests if request.method == "POST"]) == 2
     assert all(request.url.path in {"/auth/v1/token", "/auth/v1/user",
-                                   "/rest/v1/diaries", "/rest/v1/diary_messages"}
+                                   "/rest/v1/diaries", "/rest/v1/diary_messages",
+                                   "/rest/v1/diary_assets"}
                for request in fake.requests)
-    assert len(fake.database.requests) == 8
+    assert len(fake.database.requests) == 10
     assert all(secret not in repr(checks) for secret in SENSITIVE)
 
 

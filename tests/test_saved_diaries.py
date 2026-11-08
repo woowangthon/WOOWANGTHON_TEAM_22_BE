@@ -63,6 +63,8 @@ class FakeDatabase:
                  "Bearer fake-member-b": str(MEMBER_B)}[request.headers["authorization"]]
         params = request.url.params
         assert params["user_id"] == f"eq.{owner}"
+        if request.url.path == "/rest/v1/diary_assets":
+            return httpx.Response(200, json=[])
         if request.url.path == "/rest/v1/diaries":
             rows = [copy.deepcopy(row) for row in self.diaries.values() if row["user_id"] == owner]
             for field in ("id", "source_client_request_id"):

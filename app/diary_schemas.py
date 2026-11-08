@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import Field, StringConstraints
 
 from app.schemas import DiaryDraft, RequestKey, StrictModel
+from app.drawing_schemas import DrawingAsset
 
 Weather = Literal["sunny", "cloudy", "snowy", "rainy"]
 
@@ -30,8 +31,8 @@ class DiaryDetail(StrictModel):
     confirmed_at: datetime
     ai_draft: DiaryDraft
     messages: list[SavedMessage]
-    imageUrl: None = None
-    assets: list = Field(default_factory=list, max_length=0)
+    imageUrl: str | None = None
+    assets: list[DrawingAsset] = Field(default_factory=list)
 
 
 class DiarySummary(StrictModel):
