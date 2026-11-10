@@ -61,3 +61,18 @@ async def edit_diary(diary_id: UUID, request: Request, member_id: MemberId):
             raise AppError(413, "DRAWING_TOO_LARGE", "요청 크기 초과") from None
         raise AppError(422, "DIARY_EDIT_INVALID", "수정 내용을 확인해 주세요.") from None
     return await request.app.state.edit_service.edit(member_id, token, diary_id, body, content)
+
+
+@router.delete("/{diary_id}", status_code=204, openapi_extra={"parameters": [
+    {"name": "Idempotency-Key", "in": "header", "required": True,
+     "schema": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    {"name": "If-Match", "in": "header", "required": True,
+     "schema": {"type": "string", "pattern": '^"[1-9][0-9]{0,9}"$'}},
+]})
+async def delete_diary(diary_id: UUID, request: Request, member_id: MemberId):
+    key = request.headers.get("Idempotency-Key", "")
+    match = re.fullmatch(r'"([1-9][0-9]{0,9})"', request.headers.get("If-Match", ""))
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key) or not match or int(match[1]) > 2147483647:
+        raise AppError(422, "DIARY_EDIT_INVALID", "요청 ID와 If-Match 버전을 확인해 주세요.")
+    await request.app.state.edit_service.delete(member_id, diary_id, key, int(match[1]))
+    return Response(status_code=204)

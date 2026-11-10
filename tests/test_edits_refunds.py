@@ -141,10 +141,56 @@ async def test_invalid_image_is_rejected_before_reservation(data):
         assert not db.edits
 
 
+@pytest.mark.parametrize("lost", [False, True])
+async def test_delete_hides_reads_keeps_assets_rewards_and_same_date_rewrite(lost):
+    async with api() as (client, db, storage):
+        original = await saved_diary(client)
+        did = original["diary_id"]
+        await upload(client, did)
+        objects = deepcopy(storage.objects)
+        messages = deepcopy(db.messages)
+        if lost:
+            db.edit_failure = "delete_lost"
+        result = await client.delete(f"/api/diaries/{did}", headers=delete_headers())
+        assert result.status_code == (503 if lost else 204)
+        retry = await client.delete(f"/api/diaries/{did}", headers=delete_headers())
+        assert retry.status_code == 204 and retry.content == b""
+        assert_error(await client.get(f"/api/diaries/{did}"), 404, "DIARY_NOT_FOUND")
+        assert_error(await edit(client, did), 404, "DIARY_NOT_FOUND")
+        assert_error(await upload(client, did), 404, "DIARY_NOT_FOUND")
+        listing = await client.get("/api/diaries", params={"month": original["diary_date"][:7]})
+        assert listing.json()["diaries"] == []
+        assert messages == db.messages and objects == storage.objects
+        path, body, _ = await prepare(client, key="rewrite")
+        body["client_request_id"] = "rewrite"
+        rewritten = await client.post(path, json=body)
+        assert rewritten.status_code == 200, rewritten.text
+        assert rewritten.json()["diary_id"] != did
+        assert len(db.room.member(MEMBER_A).grants) == 1
+        for _ in range(2):
+            assert (await client.post("/api/me/rewards/sync", json={})).json()["wallet"] == {"coins": 30, "water_drops": 1}
+        assert len(db.diaries) == 2
 
 
+@pytest.mark.parametrize("headers", [{}, {"Idempotency-Key": "x"}, {"If-Match": '"1"'},
+                                   {"Idempotency-Key": "x", "If-Match": "1"},
+                                   {"Idempotency-Key": "x", "If-Match": 'W/"1"'}])
+async def test_delete_requires_valid_request_and_explicit_version(headers):
+    async with api() as (client, db, storage):
+        did = (await saved_diary(client))["diary_id"]
+        assert_error(await client.delete(f"/api/diaries/{did}", headers=headers), 422, "DIARY_EDIT_INVALID")
+        assert not db.deletes and db.diaries[did]["deleted_at"] is None
 
 
+async def test_delete_stale_version_and_member_isolation():
+    async with api() as (client, db, storage):
+        did = (await saved_diary(client))["diary_id"]
+        await edit(client, did)
+        assert_error(await client.delete(f"/api/diaries/{did}", headers=delete_headers()), 409, "DIARY_EDIT_VERSION_CONFLICT")
+        client.headers["Authorization"] = "Bearer fake-member-b"
+        assert_error(await edit(client, did), 404, "DIARY_NOT_FOUND")
+        assert_error(await client.delete(f"/api/diaries/{did}", headers=delete_headers(2)), 404, "DIARY_NOT_FOUND")
+        assert db.diaries[did]["deleted_at"] is None
 
 
 async def purchase(client, key="buy-1", product="chair"):
@@ -187,8 +233,34 @@ async def test_initial_drawing_upload_cannot_change_edited_revision():
         assert not storage.objects
 
 
+async def test_delete_replay_does_not_delete_new_diary_and_key_conflicts_are_detected():
+    async with api() as (client, db, storage):
+        did = (await saved_diary(client))["diary_id"]
+        assert (await client.delete(f"/api/diaries/{did}", headers=delete_headers())).status_code == 204
+        assert_error(await client.delete(f"/api/diaries/{did}", headers=delete_headers(2)), 409, "IDEMPOTENCY_CONFLICT")
+        assert_error(await client.delete(f"/api/diaries/{did}", headers=delete_headers(key="other")), 404, "DIARY_NOT_FOUND")
+        path, body, _ = await prepare(client, key="recreate")
+        body["client_request_id"] = "recreate"
+        new = (await client.post(path, json=body)).json()["diary_id"]
+        assert_error(await client.delete(f"/api/diaries/{new}", headers=delete_headers()), 409, "IDEMPOTENCY_CONFLICT")
+        assert (await client.delete(f"/api/diaries/{did}", headers=delete_headers())).status_code == 204
+        assert (await client.get(f"/api/diaries/{new}")).status_code == 200
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_deferred_first_reward_survives_delete_and_legacy_day_cannot_be_bypassed(legacy):
+    async with api() as (client, db, storage):
+        db.room.fail_during = "sync_rewards"
+        did = (await saved_diary(client))["diary_id"]
+        if legacy:
+            db.room.legacy_diary_ids.add(did)
+        assert (await client.delete(f"/api/diaries/{did}", headers=delete_headers())).status_code == 204
+        db.room.fail_during = None
+        path, body, _ = await prepare(client, key="new")
+        body["client_request_id"] = "new"
+        assert (await client.post(path, json=body)).status_code == 200
+        wallet = (await client.post("/api/me/rewards/sync", json={})).json()["wallet"]
+        assert wallet == {"coins": 0 if legacy else 30, "water_drops": 0 if legacy else 1}
 
 
 
@@ -229,8 +301,40 @@ async def test_edit_bad_repository_responses_never_return_success(outcome):
         assert result.json()["error"]["retryable"] is True
 
 
+async def test_comic_read_marks_previous_revision_stale_without_regeneration_or_deletion():
+    from tests.fake_comics import comic_api, prepared
+    async with comic_api() as (client, service, db, storage, ai):
+        path, confirm, sid, body, plan, rendered = await prepared(client, service)
+        preview = await service.persist_result(MEMBER_A, sid, body, plan, rendered)
+        did = (await client.post(path, json=confirm)).json()["diary_id"]
+        attached = await client.post(f"/api/diaries/{did}/comics", json={
+            "client_request_id": "attach", "preview_id": str(preview.preview_id)})
+        assert attached.status_code == 200
+        current = (await client.get(f"/api/diaries/{did}/comics")).json()
+        assert current["content_status"] == "current" and current["source_edit_version"] == 1
+        # 부모 revision 변경을 DB fixture에 주입해 조회 진단만 검증한다.
+        before = deepcopy((db.previews, db.links, storage.objects, ai.requests))
+        db.diaries[did]["edit_version"] = 2
+        stale = (await client.get(f"/api/diaries/{did}/comics")).json()
+        assert stale["content_status"] == "stale" and stale["current_edit_version"] == 2
+        assert before == (db.previews, db.links, storage.objects, ai.requests)
+        assert (await client.post(f"/api/diaries/{did}/comics", json={
+            "client_request_id": "again", "preview_id": str(preview.preview_id)})).status_code == 409
+        db.diaries[did]["deleted_at"] = "2026-11-10T14:00:00Z"
+        assert_error(await client.get(f"/api/diaries/{did}/comics"), 404, "DIARY_NOT_FOUND")
 
 
+async def test_openapi_and_browser_preflight_include_edit_delete_headers():
+    async with api() as (client, db, storage):
+        schema = (await client.get("/openapi.json")).json()
+        request = schema["paths"]["/api/diaries/{diary_id}/edits"]["put"]["requestBody"]
+        assert "multipart/form-data" in request["content"]
+        assert "application/json" not in request["content"]
+        cors = await client.options(f"/api/diaries/{uuid4()}", headers={
+            "Origin": "http://localhost:5500", "Access-Control-Request-Method": "DELETE",
+            "Access-Control-Request-Headers": "Authorization,Idempotency-Key,If-Match"})
+        assert cors.status_code == 200
+        assert "If-Match" in cors.headers["access-control-allow-headers"]
 
 
 async def test_legacy_confirmed_diary_without_request_fingerprint_can_be_edited_without_rewards():
@@ -242,3 +346,33 @@ async def test_legacy_confirmed_diary_without_request_fingerprint_can_be_edited_
         assert result.status_code == 200
         assert db.diaries[did]["confirmation_fingerprint"] is None
         assert len(db.room.requests) == before
+
+
+async def test_delete_rollback_keeps_visible_diary_until_successful_retry():
+    async with api() as (client, db, storage):
+        did = (await saved_diary(client))["diary_id"]
+        db.edit_failure = "delete_rollback"
+        path = f"/api/diaries/{did}"
+        assert_error(await client.delete(path, headers=delete_headers()), 503, "DIARY_EDIT_STORAGE_UNAVAILABLE")
+        assert not db.deletes and (await client.get(path)).status_code == 200
+        assert (await client.delete(path, headers=delete_headers())).status_code == 204
+
+
+@pytest.mark.parametrize("operation", ["edit", "delete"])
+async def test_malformed_success_cannot_hide_missing_drawing_or_fake_delete_flag(operation):
+    db = EditDatabase()
+    async def broken(request):
+        response = await db(request)
+        if request.url.path.endswith("/member_diary_edit") and response.status_code == 200:
+            value = response.json()
+            if operation == "edit" and value.get("state") == "completed":
+                value["result"]["original_drawing"] = None
+            elif operation == "delete":
+                value = {"deleted": 1}
+            return httpx.Response(200, json=value)
+        return response
+    async with api(broken) as (client, _, storage):
+        did = (await saved_diary(client))["diary_id"]
+        result = await edit(client, did, image=picture()) if operation == "edit" else await client.delete(
+            f"/api/diaries/{did}", headers=delete_headers())
+        assert_error(result, 503, "DIARY_EDIT_STORAGE_UNAVAILABLE")

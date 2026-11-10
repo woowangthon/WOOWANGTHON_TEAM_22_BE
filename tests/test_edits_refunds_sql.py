@@ -6,8 +6,23 @@ SQL = (Path(__file__).resolve().parents[1] / 'supabase/candidates/diary_edits_re
 CODE = re.sub(r'--[^\n]*', '', SQL).lower()
 
 
+def test_revision_and_soft_delete_preserve_original_asset_and_reward_foreign_keys():
+    assert 'add column edit_version integer not null default 1' in CODE
+    assert 'where deleted_at is null' in CODE
+    assert 'drop constraint diaries_user_date_uq' in CODE
+    for protected in ['diaries', 'diary_assets', 'diary_messages', 'member_daily_reward_grants']:
+        assert not re.search(rf'delete from public\.{protected}\b', CODE)
+    assert not re.search(r'update public\.diaries set ai_draft|set confirmation_fingerprint', CODE)
 
 
+def test_date_grant_uniqueness_and_first_confirmed_includes_deleted_entitlement():
+    assert 'unique(member_id, diary_date)' in CODE
+    assert 'on conflict (member_id, diary_date) do nothing' in CODE
+    assert 'select distinct on (diary_date)' in CODE
+    assert 'order by diary_date, confirmed_at, id' in CODE
+    assert 'where old.diary_id = d.id' in CODE
+    grant = CODE.split("if p_action = 'sync_rewards' then")[1].split("elsif p_action = 'purchase'")[0]
+    assert 'deleted_at is null' not in grant
 
 
 def test_atomic_finalization_receipt_and_active_revision_and_server_only_access():

@@ -76,3 +76,10 @@ class EditService:
             return response
         except (ValidationError, KeyError, TypeError, ValueError):
             raise edit_unavailable() from None
+
+    async def delete(self, owner_id, diary_id, key, version):
+        result = await self.repository.command(owner_id, diary_id, "delete", {
+            "client_request_id": key, "expected_version": version,
+        })
+        if set(result) != {"deleted"} or result["deleted"] is not True:
+            raise edit_unavailable()

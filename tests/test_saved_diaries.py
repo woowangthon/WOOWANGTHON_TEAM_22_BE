@@ -69,6 +69,8 @@ class FakeDatabase:
             return httpx.Response(200, json=[])
         if request.url.path == "/rest/v1/diaries":
             rows = [copy.deepcopy(row) for row in self.diaries.values() if row["user_id"] == owner]
+            if params.get("deleted_at") == "is.null":
+                rows = [row for row in rows if row.get("deleted_at") is None]
             for field in ("id", "source_client_request_id"):
                 if field in params:
                     rows = [row for row in rows if f"eq.{row[field]}" == params[field]]
@@ -104,7 +106,7 @@ class FakeDatabase:
         diary_date = datetime.fromisoformat(payload["p_confirmed_at"]).astimezone(
             timezone(timedelta(hours=9)),
         ).date().isoformat()
-        if any(row["user_id"] == payload["p_user_id"] and row["diary_date"] == diary_date
+        if any(row["user_id"] == payload["p_user_id"] and row["diary_date"] == diary_date and row.get("deleted_at") is None
                for row in self.diaries.values()):
             return httpx.Response(409, json={
                 "code": "PT409", "details": "DIARY_DATE_CONFLICT",

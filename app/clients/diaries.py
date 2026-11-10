@@ -108,9 +108,9 @@ class DiaryRepository:
 
     async def owned_diary(self, owner_id: UUID, token: str, diary_id: UUID):
         params = {"user_id": f"eq.{owner_id}", "id": f"eq.{diary_id}",
-                  "select": DETAIL_COLUMNS, "limit": "2"}
+                  "select": DETAIL_COLUMNS, "deleted_at": "is.null", "limit": "2"}
         rows = await self._rows("/rest/v1/diaries", token, params)
-        if not rows:
+        if not rows or rows[0].get("deleted_at") is not None:
             raise AppError(404, "DIARY_NOT_FOUND", "일기 없음")
         if len(rows) != 1:
             raise invalid_response()
@@ -150,7 +150,7 @@ class DiaryRepository:
         # 월별 일기 조회
         rows = await self._rows("/rest/v1/diaries", token, [
             ("select", "id,diary_date,weather,confirmed_text"),
-            ("user_id", f"eq.{owner_id}"), ("diary_date", f"gte.{start}"),
+            ("user_id", f"eq.{owner_id}"), ("deleted_at", "is.null"), ("diary_date", f"gte.{start}"),
             ("diary_date", f"lte.{end}"), ("order", "diary_date.asc"), ("limit", "31"),
         ])
         try:
