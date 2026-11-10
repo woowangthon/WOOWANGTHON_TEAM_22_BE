@@ -6,9 +6,9 @@ from typing import Annotated
 from app.auth import MemberId
 from app.errors import AppError
 from app.room_schemas import (
-    ItemId, PurchaseRequest, PurchaseResponse,
+    ItemId, PlacementRequest, PlacementResponse, PurchaseRequest, PurchaseResponse,
     RewardSyncRequest, RewardSyncResponse, RoomResponse, ShopResponse,
-    )
+    ThemeRequest, )
 
 class RoomRoute(APIRoute):
     def get_route_handler(self):
@@ -47,3 +47,28 @@ async def shop_items(request: Request, member_id: MemberId):
 @router.post("/shop/purchases", response_model=PurchaseResponse)
 async def purchase(body: PurchaseRequest, request: Request, member_id: MemberId):
     return await request.app.state.room_service.execute(member_id, "purchase", body)
+
+
+
+
+@router.put("/me/room/placements/{item_id}", response_model=PlacementResponse)
+async def place(item_id: ItemPath, body: PlacementRequest, request: Request, member_id: MemberId):
+    return await request.app.state.room_service.execute(member_id, "place", _Placement(item_id=item_id, **body.model_dump()))
+
+
+@router.delete("/me/room/placements/{item_id}", status_code=204)
+async def remove_placement(item_id: ItemPath, request: Request, member_id: MemberId):
+    await request.app.state.room_service.execute(member_id, "remove_placement", _Item(item_id=item_id))
+    return Response(status_code=204)
+
+
+
+
+
+
+class _Item(ThemeRequest):
+    item_id: ItemId
+
+
+class _Placement(PlacementRequest):
+    item_id: ItemId

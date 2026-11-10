@@ -166,6 +166,27 @@ async def test_unknown_inactive_and_unaffordable_products_do_not_mutate_wallet()
         assert db.member(MEMBER_A).coins == 0 and not db.member(MEMBER_A).owned
 
 
+async def test_placement_bounds_upsert_and_delete_preserve_inventory():
+    async with room_api() as (client, db, app, ai):
+        db.items["chair"] = item()
+        db.member(MEMBER_A).coins = 30
+        assert (await buy(client)).status_code == 200
+        path = "/api/me/room/placements/chair"
+        for x, y in [(230, 310), (1340, 820), (0, 0), (230, 311)]:
+            result = await client.put(path, json={"x": x, "y": y})
+            assert result.status_code == 200
+            assert result.json() == {"item_id": "chair", "position": {"x": x, "y": y}}
+        before = deepcopy(db.member(MEMBER_A).placements)
+        for x, y in [(1341, 0), (0, 821), (1440, 900)]:
+            assert_error(await client.put(path, json={"x": x, "y": y}), 422, "ROOM_POSITION_INVALID")
+        assert db.member(MEMBER_A).placements == before
+        assert len(before) == 1
+        for _ in range(2):
+            removed = await client.delete(path)
+            assert removed.status_code == 204 and removed.content == b""
+        room = (await client.get("/api/me/room")).json()
+        assert room["inventory"][0]["position"] is None and len(room["inventory"]) == 1
+        assert room["wallet"]["coins"] == 0
 
 
 
@@ -184,6 +205,14 @@ async def test_unknown_inactive_and_unaffordable_products_do_not_mutate_wallet()
 
 
 
+@pytest.mark.parametrize("body", [{"x": True, "y": 0}, {"x": "0", "y": 0}, {"x": -1, "y": 0},
+                                  {"x": 0, "y": 901}, {"x": 0}, {"x": None, "y": 0},
+                                  {"x": 1.0, "y": 0}, {"x": 0, "y": 1.5}, {"x": 0, "y": False},
+                                  {"x": 0, "y": 0, "member_id": str(MEMBER_B)}])
+async def test_placement_input_rejects_non_numeric_missing_and_forged_fields(body):
+    async with room_api() as (client, db, app, ai):
+        assert_error(await client.put("/api/me/room/placements/chair", json=body), 422, "ROOM_POSITION_INVALID")
+        assert not db.requests
 
 
 
@@ -248,3 +277,17 @@ async def test_rewards_need_no_configuration():
 async def test_room_environment_configuration_keeps_session_default(monkeypatch):
     monkeypatch.delenv("SESSION_STORE_MODE", raising=False)
     assert Settings.from_env().session_store_mode == "memory"
+
+
+
+
+
+
+@pytest.mark.parametrize("content", [b'{"x":NaN,"y":0}', b'{"x":Infinity,"y":0}',
+                                     b'{"x":0,"y":', b'null', b'{}'])
+async def test_invalid_placement_json_is_sanitized_as_position_error(content):
+    async with room_api() as (client, db, app, ai):
+        response = await client.put("/api/me/room/placements/chair", content=content,
+                                    headers={"Content-Type": "application/json"})
+        assert_error(response, 422, "ROOM_POSITION_INVALID")
+        assert not db.requests

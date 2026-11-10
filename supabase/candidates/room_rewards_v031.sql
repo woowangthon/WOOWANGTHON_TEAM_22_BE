@@ -263,13 +263,13 @@ begin
         and u.is_anonymous is false and u.role = 'authenticated' and u.deleted_at is null) then
         raise exception using errcode = '22023', message = 'invalid member';
     end if;
-    if p_action is null or p_action not in ('get_room', 'sync_rewards', 'list_items', 'purchase') then
+    if p_action is null or p_action not in ('get_room', 'sync_rewards', 'list_items', 'purchase', 'place', 'remove_placement') then
         raise exception using errcode = '22023', message = 'invalid room action';
     end if;
     v_keys := case p_action
         when 'purchase' then array['client_request_id', 'item_id']
-
-
+        when 'place' then array['item_id', 'x', 'y']
+        when 'remove_placement' then array['item_id']
 
  else array[]::text[] end;
     if p_payload is null or pg_catalog.jsonb_typeof(p_payload) <> 'object'
@@ -351,6 +351,38 @@ begin
         end if;
         v_state := public.room_snapshot(p_member_id, v_today);
         return pg_catalog.jsonb_build_object('item_id', p_payload->>'item_id', 'owned', true, 'wallet', v_state->'wallet');
+    elsif p_action in ('place', 'remove_placement') then
+        if p_payload->>'item_id' is not null then
+            select i.* into v_item from public.shop_items i where i.item_id = p_payload->>'item_id' for share;
+            if not found then
+                raise exception using errcode = 'PT404', message = 'item not found', detail = 'ITEM_NOT_FOUND';
+            end if;
+            if not exists (select 1 from public.member_owned_items o
+                where o.member_id = p_member_id and o.item_id = v_item.item_id) then
+                raise exception using errcode = 'PT409', message = 'item not owned', detail = 'ITEM_NOT_OWNED';
+            end if;
+        end if;
+        if v_item.category not in ('furniture', 'decoration') then
+            raise exception using errcode = 'PT422', message = 'not placeable', detail = 'ITEM_NOT_PLACEABLE';
+        end if;
+        if p_action = 'remove_placement' then
+            delete from public.member_room_placements where member_id = p_member_id and item_id = v_item.item_id;
+            return '{}'::jsonb;
+        end if;
+        if pg_catalog.jsonb_typeof(p_payload->'x') <> 'number'
+            or pg_catalog.jsonb_typeof(p_payload->'y') <> 'number'
+            or (p_payload->>'x') !~ '^[0-9]{1,4}$' or (p_payload->>'y') !~ '^[0-9]{1,3}$' then
+            raise exception using errcode = 'PT422', message = 'invalid position', detail = 'ROOM_POSITION_INVALID';
+        end if;
+        v_x := (p_payload->>'x')::integer;
+        v_y := (p_payload->>'y')::integer;
+        if v_x < 0 or v_y < 0 or v_x + v_item.width > 1440 or v_y + v_item.height > 900 then
+            raise exception using errcode = 'PT422', message = 'invalid position', detail = 'ROOM_POSITION_INVALID';
+        end if;
+        insert into public.member_room_placements(member_id, item_id, x, y, updated_at)
+            values (p_member_id, v_item.item_id, v_x, v_y, v_now)
+            on conflict (member_id, item_id) do update set x = excluded.x, y = excluded.y, updated_at = excluded.updated_at;
+        return pg_catalog.jsonb_build_object('item_id', v_item.item_id, 'position', pg_catalog.jsonb_build_object('x', v_x, 'y', v_y));
     end if;
     raise exception using errcode = '22023', message = 'unhandled room action';
 end;

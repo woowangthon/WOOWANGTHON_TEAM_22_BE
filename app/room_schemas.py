@@ -20,8 +20,13 @@ class PurchaseRequest(StrictModel):
     item_id: ItemId
 
 
+class PlacementRequest(StrictModel):
+    x: Coordinate
+    y: Annotated[int, Field(ge=0, le=900)]
 
 
+class ThemeRequest(StrictModel):
+    item_id: ItemId | None
 
 
 
@@ -110,6 +115,9 @@ class PurchaseResponse(StrictModel):
 
 
 
+class PlacementResponse(StrictModel):
+    item_id: ItemId
+    position: Position
 
 
 

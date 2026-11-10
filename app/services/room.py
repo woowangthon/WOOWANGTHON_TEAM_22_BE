@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from app.clients.room import RoomRepository, room_storage_unavailable
 from app.room_schemas import (
-    PurchaseResponse, RewardSyncResponse, RoomResponse,
+    PlacementResponse, PurchaseResponse, RewardSyncResponse, RoomResponse,
     ShopResponse, )
 
 
@@ -23,7 +23,7 @@ class RoomService:
         schema = {
             "get_room": RoomResponse, "list_items": ShopResponse,
             "sync_rewards": RewardSyncResponse, "purchase": PurchaseResponse,
-
+            "place": PlacementResponse,
         }[action]
         try:
             # JSON 날짜 문자열은 허용하되 문자열 잔액과 bool 좌표는 거절한다.
