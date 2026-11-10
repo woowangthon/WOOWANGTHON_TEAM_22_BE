@@ -42,6 +42,8 @@ class FakeDatabase:
 
     async def __call__(self, request):
         self.requests.append(request)
+        if request.url.path == "/rest/v1/rpc/member_room_command":
+            return httpx.Response(404, json={"code": "PGRST202"})
         assert not request.headers.get("cookie")
         if self.fail_next is not None:
             outcome, self.fail_next = self.fail_next, None
@@ -210,7 +212,7 @@ async def test_members_save_read_and_cross_access(saved_api):
             assert_error(foreign, 404, "DIARY_NOT_FOUND")
             assert foreign.json()["error"] == missing.json()["error"]
         assert len(db.diaries) == 2
-        assert len([r for r in db.requests if r.method == "POST"]) == 2
+        assert len([r for r in db.requests if r.url.path == "/rest/v1/rpc/confirm_member_diary"]) == 2
         assert FAKE_SECRET not in json.dumps(ai.requests)
 
 
@@ -237,7 +239,7 @@ async def test_retry_restart_and_changed_request(saved_api):
         assert_error(await client.post(url.replace("ses_", "ses_0"), json=body),
                      409, "IDEMPOTENCY_CONFLICT")
         assert len(db.diaries) == 1
-        assert len([r for r in db.requests if r.method == "POST"]) == 1
+        assert len([r for r in db.requests if r.url.path == "/rest/v1/rpc/confirm_member_diary"]) == 1
 
 
 @pytest.mark.anyio
@@ -545,4 +547,4 @@ async def test_independent_process_rpc_race(saved_api, change, conflict):
             assert_error(next(r for r in responses if r.status_code != 200), 409, conflict)
         assert len(db.diaries) == len(db.messages) == 1
         assert len(next(iter(db.messages.values()))) == 3
-        assert len([r for r in db.requests if r.method == "POST"]) == 2
+        assert len([r for r in db.requests if r.url.path == "/rest/v1/rpc/confirm_member_diary"]) == 2

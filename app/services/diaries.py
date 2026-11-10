@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from hashlib import sha256
 from uuid import UUID
@@ -9,12 +10,29 @@ from app.errors import AppError
 from app.schemas import DiaryDraftResponse
 from app.session_store import RequestRecord, SessionStore
 from app.persistent_session_store import PersistentSessionStore
+from app.services.room import RoomService
+
+logger = logging.getLogger(__name__)
 
 
 class DiaryService:
-    def __init__(self, store: SessionStore | PersistentSessionStore, repository: DiaryRepository):
+    def __init__(self, store: SessionStore | PersistentSessionStore, repository: DiaryRepository,
+                 rewards: RoomService | None = None):
         self.store = store
         self.repository = repository
+        self.rewards = rewards
+
+    async def _confirmed_detail(self, owner_id: UUID, token: str, diary_id: UUID) -> DiaryDetail:
+        detail = await self.repository.detail(owner_id, token, diary_id)
+        if self.rewards is not None:
+            try:
+                # 확정 저장은 이미 커밋되었다. 별도 RPC 실패가 저장 성공을 취소하면 안 된다.
+                # 프로세스가 여기 도달하지 못해도 DB의 일기/보류 목록/지급 기록으로 sync가 복구한다.
+                await self.rewards.execute(owner_id, "sync_rewards")
+            except Exception:
+                # 키/본문/회원 ID/DB 오류 원문은 로그에 남기지 않는다.
+                logger.warning("DIARY_REWARD_SYNC_DEFERRED")
+        return detail
 
     async def confirm(self, owner_id: UUID, token: str, session_id: str,
                       body: ConfirmDiaryRequest) -> DiaryDetail:
@@ -32,11 +50,11 @@ class DiaryService:
                 if isinstance(self.store, PersistentSessionStore):
                     await self.store.repository.check_existing_owner(owner_id, session_id)
                 raise AppError(409, "IDEMPOTENCY_CONFLICT", "요청 내용 불일치")
-            return await self.repository.detail(owner_id, token, diary_id)
+            return await self._confirmed_detail(owner_id, token, diary_id)
 
         if isinstance(self.store, PersistentSessionStore):
             diary_id = await self.store.confirm(owner_id, session_id, body, fingerprint)
-            return await self.repository.detail(owner_id, token, diary_id)
+            return await self._confirmed_detail(owner_id, token, diary_id)
 
         # 회원 소유권 확인
         session = self.store.owned_session(owner_id, session_id)
@@ -66,7 +84,7 @@ class DiaryService:
                 "p_messages": [{"position": position, **message.model_dump()}
                                for position, message in enumerate(session.messages)],
             })
-            return await self.repository.detail(owner_id, token, diary_id)
+            return await self._confirmed_detail(owner_id, token, diary_id)
         finally:
             if session.busy is reservation:
                 session.busy = None

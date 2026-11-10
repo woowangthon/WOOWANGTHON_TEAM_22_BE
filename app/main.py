@@ -6,16 +6,19 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router
 from app.api.diaries import router as diary_router
+from app.api.room import router as room_router
 from app.clients.ai import AIClient
 from app.clients.auth import AuthClient
 from app.clients.diaries import DiaryRepository
 from app.clients.drawings import DrawingRepository
 from app.clients.sessions import SessionRepository
+from app.clients.room import RoomRepository
 from app.config import Settings
 from app.errors import install_error_handlers
 from app.services.chat import ChatService
 from app.services.diaries import DiaryService
 from app.services.drawings import DrawingService
+from app.services.room import RoomService
 from app.session_store import SessionStore
 from app.persistent_session_store import PersistentSessionStore
 
@@ -90,13 +93,17 @@ def create_app(settings: Settings | None = None,
             repository.drawings = DrawingRepository(
                 repository, *storage_clients, settings.db_request_timeout_seconds,
             )
-            app.state.diary_service = DiaryService(store, repository)
+            app.state.room_service = RoomService(
+                RoomRepository(writer, settings.db_request_timeout_seconds),
+            )
+            app.state.diary_service = DiaryService(store, repository, app.state.room_service)
             app.state.drawing_service = DrawingService(repository.drawings)
             yield
 
     app = FastAPI(title="오늘,그리고 BE (잠정 API)", version="0.1.0", lifespan=lifespan)
     app.include_router(router)
     app.include_router(diary_router)
+    app.include_router(room_router)
     install_error_handlers(app)
     app.add_middleware(
         CORSMiddleware,
