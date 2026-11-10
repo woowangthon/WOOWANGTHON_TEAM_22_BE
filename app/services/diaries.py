@@ -8,16 +8,17 @@ from app.diary_schemas import ConfirmDiaryRequest, DiaryDetail
 from app.errors import AppError
 from app.schemas import DiaryDraftResponse
 from app.session_store import RequestRecord, SessionStore
+from app.persistent_session_store import PersistentSessionStore
 
 
 class DiaryService:
-    def __init__(self, store: SessionStore, repository: DiaryRepository):
+    def __init__(self, store: SessionStore | PersistentSessionStore, repository: DiaryRepository):
         self.store = store
         self.repository = repository
 
     async def confirm(self, owner_id: UUID, token: str, session_id: str,
                       body: ConfirmDiaryRequest) -> DiaryDetail:
-        if session_id in self.store.sessions:
+        if isinstance(self.store, SessionStore) and session_id in self.store.sessions:
             self.store.owned_session(owner_id, session_id)
         fingerprint = sha256(json.dumps(
             {"session_id": session_id, **body.model_dump()},
@@ -28,7 +29,13 @@ class DiaryService:
         if previous is not None:
             diary_id, saved_fingerprint = previous
             if fingerprint != saved_fingerprint:
+                if isinstance(self.store, PersistentSessionStore):
+                    await self.store.repository.check_existing_owner(owner_id, session_id)
                 raise AppError(409, "IDEMPOTENCY_CONFLICT", "요청 내용 불일치")
+            return await self.repository.detail(owner_id, token, diary_id)
+
+        if isinstance(self.store, PersistentSessionStore):
+            diary_id = await self.store.confirm(owner_id, session_id, body, fingerprint)
             return await self.repository.detail(owner_id, token, diary_id)
 
         # 회원 소유권 확인

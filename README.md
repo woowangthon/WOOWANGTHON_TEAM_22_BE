@@ -73,6 +73,7 @@ AI 서버 상태를 검사하는 경로는 아닙니다. API 문서는 `/docs`�
 | AUTH_REQUEST_TIMEOUT_SECONDS | 10, Auth HTTP 및 전체 요청 제한 |
 | SUPABASE_SECRET_KEY | 쓰기 전용 `sb_secret_` 키. BE 서버 환경/secret manager에만 주입, 누락 시 신규 저장 503 |
 | DB_REQUEST_TIMEOUT_SECONDS | 10, 개별 DB HTTP와 전체 요청 제한. 자동 재시도 없음 |
+| SESSION_STORE_MODE | `memory` 기본값. `supabase`는 005 적용·실DB 검증 후에만 활성화. DB 실패 시 메모리 우회 없음 |
 
 변수 예시는 Git에서 공유하는 [.env.example](.env.example)에도 있습니다.
 개발 CORS는 지정한 origin만 허용하고 자격증명 전송을 허용하지 않습니다.
@@ -84,6 +85,66 @@ AI 서버 상태를 검사하는 경로는 아닙니다. API 문서는 `/docs`�
 
 모든 대화·초안·확정·조회 API는 `Authorization: Bearer <Supabase access token>` 필수. `GET /health` 공개 유지.
 요청 본문·성공 응답 필드와 기존 요청 ID/버전 규칙 유지. `user_id` 등 추가 필드는 기존대로 422.
+
+### 선택형 세션 영속화 — 005 로컬 후보
+
+`SESSION_STORE_MODE=memory`가 기본값입니다. 기존 배포는 이 기본값으로 유지할 수 있습니다.
+`supabase/migrations/20261109000500_persist_chat_sessions.sql`은 **원격 미적용 로컬 후보**입니다.
+실제 PostgreSQL RPC·RLS·트랜잭션·동시성을 검증한 뒤에만 `supabase` 모드를 선택합니다.
+이번 구현에는 시작 시 자동 migration, 전체 회원 세션 적재, 메모리/DB 사이 자동 이관이 없습니다.
+
+영속 모드는 기존 `SUPABASE_SECRET_KEY`를 사용하는 `SessionRepository`와
+`PersistentSessionStore`가 담당합니다. 기존 Auth의 비익명 회원 UUID만 소유자로 전달합니다.
+Secret 누락은 `503 SESSION_STORAGE_NOT_CONFIGURED`, DB/005 누락·장애는
+`503 SESSION_STORAGE_UNAVAILABLE`, 손상된 응답은 `503 SESSION_STORAGE_INVALID_RESPONSE`입니다.
+어느 경우에도 메모리 성공으로 우회하거나 AI를 자동 재호출하지 않습니다. `/health`는 기존 공개 응답을 유지합니다.
+
+- `chat_sessions`: 완료된 원본 대화·revision·schema_version·lifecycle·현재 요청·확정 일기 참조.
+- `chat_requests`: 회원/세션/종류별 요청 키·지문·입력 원문·기준 revision·attempt token·상태·성공 응답·안전한 오류.
+- `reserve_chat_request`: 회원·소유권·키·버전·동시성 검사와 입력 예약. 시작 키는 회원 전체,
+  발언/초안은 세션 및 종류별, 확정 키는 기존 003처럼 회원 전체 범위입니다.
+- `transition_chat_request`: 전송 직전 CAS를 확인한 호출자만 AI를 1회 호출합니다.
+  성공 응답과 이력/revision을 같은 트랜잭션에 반영한 뒤 API 성공을 반환합니다.
+- `confirm_chat_session_diary`: DB에 기록된 초안과 원본 대화로 기존 003을 내부 호출해
+  일기·원문·요청 성공·세션 confirmed를 함께 기록합니다. 임시 그림 서명 URL은 저장하지 않습니다.
+
+예약 lease는 DB 시각 기준 30초입니다. 전송 기한은
+`max(180, floor(AI_REQUEST_TIMEOUT_SECONDS + DB_REQUEST_TIMEOUT_SECONDS + 30) + 1)`초로
+기본 180초입니다. 영속 모드의 이 합계는 SQL 전이 기한 상한 86,400초 내로 설정해야 합니다.
+예약 만료는 같은 ID·원문만 새 token으로 인계할 수 있습니다. 전송 확인 후 종료되면 기한 전에는
+`REQUEST_IN_PROGRESS`/`SESSION_BUSY`, 기한 뒤 같은 요청 또는 새 예약 접근 시 `AI_OUTCOME_UNKNOWN`입니다.
+만료 판단은 다음 POST에서 수행하며 백그라운드 스캐너는 없습니다. 옛 token과 늦은 완료는 거절합니다.
+외부 AI와 DB의 완전한 원자성은 없으므로 실제 전송이 없었어도 보수적으로 unknown일 수 있습니다.
+
+같은 ID의 기록된 성공은 재시작 뒤 같은 응답 ID·revision·draft_id로 회수합니다.
+unknown은 같은 ID에서 오류만 재현하고 해당 세션의 새 발언·초안·확정을 차단합니다.
+연결 전 실패(`AI_CONNECTION_FAILED`)만 같은 ID/원문 재시도를 허용하며 기준 revision이 달라지면 409입니다.
+명확한 AI 실패는 같은 오류를 재현합니다. 확정된 세션의 새 쓰기는
+`409 SESSION_ALREADY_CONFIRMED`, 저장 한도는 `422 SESSION_LIMIT_REACHED`입니다.
+이 오류와 가드는 영속 모드의 추가 동작이며 FE의 상세 안내 문구는 후속 합의 대상입니다.
+
+확정은 AI의 dispatched/unknown에 넣지 않습니다. 기존 회원 JWT `find_request` 선행 복구를 유지하며,
+DB 예약 시각 `confirmed_at`을 보존하므로 응답 유실·자정 이후 재시도에도 날짜를 바꾸지 않습니다.
+명확한 날짜/요청 충돌만 failed로 기록하고 세션 잠금을 해제합니다. DB 장애는 예약을 보존해 같은 키로 확인합니다.
+기존 003 기록의 복구와 004 그림 pending/ready·동일 Blob 업로드·300초 서명 URL 동작을 유지합니다.
+
+SQL 후보에는 회원별 활성 세션 3개, 세션별 요청 128개, 입력 512 KiB/결과 1 MiB,
+세션 이력+입력+결과 합계 2 MiB 제한이 있습니다. 기존 60메시지/합계20,000자 제한도 유지합니다.
+유효한 최대 길이의 6페이지 공백/Unicode fixture가 512 KiB를 넘을 수 있어 결과 한도만 1 MiB로 정했습니다.
+완료 결과로 총량을 초과하면 unknown으로 보존해 AI 재호출을 막습니다.
+`expires_at`은 마지막 성공 변경 후 7일의 정리 후보 메타데이터이며 현재 만료 처리/자동 삭제는 없습니다.
+unknown·요청 키·원문을 지우는 도구, cron, TTL 정리도 없습니다. 운영 보존 정책은 후속 검토 대상입니다.
+
+새 표의 회원 직접 읽기/쓰기와 RPC 실행은 차단하며 service_role 전용 권한과 복합 소유권 FK를 둡니다.
+001~004·기존 회원·Storage를 변경하거나 과거 데이터를 backfill하지 않습니다.
+로컬 Fake 저장소/Mock HTTP 검증은 실제 PostgreSQL 잠금·RLS·원자성을 증명하지 못합니다.
+005 적용 전에는 권한·실제 member 검사·원자적 rollback·동시 시작/발언/확정·lease/늦은 완료를
+격리 환경에서 검증하고, 실제 Supabase 검증 대상/횟수와 배포 소스 반영은 별도 승인 범위로 정합니다.
+
+브라우저를 열어 둔 채 BE만 재시작하면 FE에 남은 같은 ID/본문으로 기록된 결과를 확인할 수 있습니다.
+브라우저 새로고침/종료의 session_id·요청 ID 보관과 복구 조회 API는 별도 FE 합의 대상이며 이번 추가 API는 없습니다.
+미업로드 그림 Blob은 BE 영속화로 복원되지 않습니다. 이미 사라진 메모리 세션도 소급 복원하지 않습니다.
+Render 기동 지연·플랫폼 중지·Supabase 장애는 남으며, 원본 BE 변경은 별도 배포 저장소에 자동 반영되지 않습니다.
 
 ### Supabase 회원 인증
 
@@ -138,7 +199,7 @@ Supabase에 위임하므로 아래 실연동 확인 필요. 이번 작업에서 
 
 ### 영구 저장·배포 후속 작업
 
-단일 프로세스 메모리 구현 유지. 재시작·reload 시 세션/이력/초안/중복 기록 소실, TTL·quota 없음.
+기본 `memory` 모드는 단일 프로세스 메모리 구현 유지. 재시작·reload 시 세션/이력/초안/중복 기록 소실, TTL·quota 없음.
 다중 worker·다중 인스턴스 전환 전 공유 DB에 회원 UUID/소유권·확정 이력·revision·요청 결과 저장 필요.
 회원별 시작 키와 세션별 요청 ID의 고유 제약, 예약/완료 트랜잭션·락·실패 복구·보존/삭제 정책 필요.
 배포에서는 HTTPS·정확한 FE origin·Publishable key 환경 설정·Auth 리전/지연/호출 제한·로그 마스킹 확인.
@@ -177,8 +238,9 @@ AI 주소는 HTTP(S) origin으로 지정합니다. BE는 `/api/chat`, `/api/diar
 연결 전 실패만 같은 ID·본문으로 명시적 재시도가 가능하고, timeout 후 결과 불명 오류는 캐시합니다.
 세션 ID는 인증 수단이 아닙니다.
 
-세션과 요청 기록은 단일 프로세스 메모리에만 있습니다. **BE 재시작 시 모두 사라집니다.**
-미확정 세션의 TTL·영구 저장·자동 정리는 없습니다. 확정 일기와 당시 대화는 별도 DB 저장 대상입니다.
+기본 `memory` 모드의 세션과 요청 기록은 **BE 재시작 시 모두 사라집니다.**
+선택형 `supabase` 모드는 아래 세션 영속화 항목을 따릅니다. 두 모드 사이 데이터 이관은 없습니다.
+자동 정리는 없으며 확정 일기와 당시 대화는 기존 DB 저장 경로를 유지합니다.
 `--workers 1`을 유지하고 최초 연동 검증에서는 `--reload`를 사용하지 않습니다.
 발언은 공백뿐인 값·잘못된 Unicode를 제외한 1~2,000자이며 원문을 보존합니다.
 전체 이력은 60개/20,000자 이내이고 AI 답변 150자 여유를 확보하므로 최대 29회 왕복입니다.
@@ -200,7 +262,7 @@ FE는 messages를 제출하지 않습니다. BE가 첫 질문부터 마지막 �
 `sources[].id`와 `pages[].source_ids`는 해당 이력의 0부터 시작하는 인덱스이며 BE 메시지 ID가 아닙니다.
 아이 발언이 없으면 422, 대화 버전이 다르면 409입니다. 같은 요청 ID+버전 재전송은 캐시를 복구합니다.
 초안 생성과 발언은 같은 세션에서 동시에 진행할 수 없습니다. timeout 이후 같은 ID로 AI를 재호출하지 않습니다.
-초안은 메모리 재전송 캐시일 뿐이며 **최종 일기·영구 저장·사용자 확인 완료가 아닙니다.**
+초안은 선택한 모드의 재전송 결과이며 **최종 일기·사용자 확인 완료가 아닙니다.**
 
 초안 `pages`는 `{text,source_ids,imageUrl:null}` 1~6개, `sources`는 `{id,text}` 목록입니다.
 본문/페이지 글은 최대 20,000자이며 출처는 전체 이력의 child 원문·순서와 일치해야 합니다.
@@ -521,7 +583,7 @@ Authorization: Bearer <회원 access token>
 대화가 이후 바뀌거나 서버가 재시작해도 이미 성공한 요청의 결과를 반환합니다. 이 복구에는 쓰기 키가 필요하지 않습니다.
 같은 키의 다른 요청은 409, 같은 날 다른 키의 일기는 409이며 다른 회원의 같은 키는 독립적입니다.
 쓰기/읽기 timeout은 이미 커밋됐을 가능성이 있으므로 **같은 키와 본문으로만 재시도**합니다.
-신규 키로 우회하지 않습니다. 최초 저장에 성공하지 못한 미확정 세션은 재시작 시 소실됩니다.
+신규 키로 우회하지 않습니다. 기본 메모리 모드의 미확정 세션은 재시작 시 소실됩니다.
 
 | HTTP | 신규 오류 코드 | 의미 / retryable |
 | --- | --- | --- |

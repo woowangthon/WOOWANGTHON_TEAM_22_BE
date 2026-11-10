@@ -10,19 +10,22 @@ from app.clients.ai import AIClient
 from app.clients.auth import AuthClient
 from app.clients.diaries import DiaryRepository
 from app.clients.drawings import DrawingRepository
+from app.clients.sessions import SessionRepository
 from app.config import Settings
 from app.errors import install_error_handlers
 from app.services.chat import ChatService
 from app.services.diaries import DiaryService
 from app.services.drawings import DrawingService
 from app.session_store import SessionStore
+from app.persistent_session_store import PersistentSessionStore
 
 
 def create_app(settings: Settings | None = None,
                ai_transport: httpx.AsyncBaseTransport | None = None,
                auth_transport: httpx.AsyncBaseTransport | None = None,
                db_transport: httpx.AsyncBaseTransport | None = None,
-               storage_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
+               storage_transport: httpx.AsyncBaseTransport | None = None,
+               session_repository: SessionRepository | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
 
     @asynccontextmanager
@@ -68,7 +71,9 @@ def create_app(settings: Settings | None = None,
                     transport=db_transport or httpx.AsyncHTTPTransport(retries=0),
                     follow_redirects=False, trust_env=False,
                 ))
-            store = SessionStore()
+            store = (PersistentSessionStore(session_repository or SessionRepository(
+                writer, settings.db_request_timeout_seconds, settings.ai_request_timeout_seconds,
+            )) if settings.session_store_mode == "supabase" else SessionStore())
             app.state.chat_service = ChatService(
                 store, AIClient(http, settings.ai_request_timeout_seconds),
             )

@@ -1,6 +1,7 @@
 import os
 import re
 from urllib.parse import urlsplit
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
@@ -22,6 +23,7 @@ class Settings(BaseModel):
     auth_request_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
     supabase_secret_key: SecretStr | None = None
     db_request_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
+    session_store_mode: Literal["memory", "supabase"] = "memory"
 
     @field_validator("supabase_secret_key")
     @classmethod
