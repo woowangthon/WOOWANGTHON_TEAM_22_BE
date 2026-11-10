@@ -1,0 +1,215 @@
+오늘,그리고 — 저장 전 AI 4컷 만화 BE 로컬 구현 보고
+2026-11-10 Asia/Seoul / 운영 미적용 / FE JSON 계약 최종 확정 전 후보
+
+2026-11-11 정리: 아래는 최초 만화 후보 구현 당시 기록이다. 현재 코드의 수정 버전 진단,
+삭제 일기 제외 및 v0.4 SQL 의존성은 DIARY_EDITS_REFUNDS_V04.txt를 함께 따른다.
+자동 생성 POST는 계속 503 보류이며, 이번 Git 정리로 활성화하거나 DB에 적용하지 않는다.
+
+1. 구현 범위와 API 상태
+
+POST /api/chat-sessions/{session_id}/comic-previews
+  기존 Bearer 회원 인증 후 세션 소유자, busy, 현재 history_revision,
+  서버에 저장된 draft_id/초안 revision/원문을 검사한다.
+  입력은 client_request_id/history_revision/draft_id만 허용한다.
+  FE가 준 본문·confirmed·user_id는 거절한다. 본문 절단·새 장면 추가 없음.
+  정상 입력도 503 COMIC_PREVIEW_NOT_ENABLED, retryable=false로 반환한다.
+  확인 계약과 지속성 실행 수단이 없으므로 작업·이미지 생성·일기 확정을 시작하지 않는다.
+  202/queued, BackgroundTasks, 메모리 큐, 자동 재시도는 구현하지 않았다.
+
+GET /api/chat-sessions/{session_id}/comic-previews/{preview_id}
+  DB에 이미 보관한 결과만 회원 JWT·owner/session/preview 조건으로 읽는다.
+  결과가 없거나 타인/다른 세션의 결과이면 404 COMIC_PREVIEW_NOT_FOUND.
+  세션 메모리가 사라져도 결과 DB가 남아 있으면 재조회할 수 있다.
+  GET은 AI 호출·업로드·완료 처리·작업 복구를 하지 않는다.
+
+POST /api/diaries/{diary_id}/comics
+  client_request_id/preview_id만 받는다. 회원 일기 소유권을 먼저 검사한다.
+  별도 후보 RPC가 확정 fingerprint/confirmed_at, 소유자, source_session_id,
+  source_history_revision, ai_draft.draft_id/text, confirmed_text를 원자적으로 대조한다.
+  ready 또는 저장 완료된 partial 결과만 연결한다. pending/이미지 전부 실패는409.
+  요청 영수증으로 같은 요청 재전송/응답 유실을 복구한다. 다른 요청도 기존 같은 연결은 유지한다.
+  같은 키의 다른 일기/preview는409 IDEMPOTENCY_CONFLICT.
+  이미 연결된 일기/preview를 다른 연결로 교체하지 않는다(COMIC_ALREADY_ATTACHED).
+
+GET /api/diaries/{diary_id}/comics
+  일기 소유권 검사 후 연결된 만화를 반환한다. 후보 SQL 적용 후 만화가 없는 기존 일기는200 none.
+  스키마가 없는 오류를 none으로 숨기지 않는다. 아직 운영에서 쓸 수 있다는 뜻이 아니다.
+
+2. 응답 후보 — FE 확인 필요
+
+GET preview / POST attach / GET saved comic은 동일한 최소 응답을 제안한다.
+{
+  "preview_id": "UUID 또는 null",
+  "status": "none | ready | partial | failed",
+  "panels": [
+    {"position":1,"caption":"원문 장면 글","status":"ready",
+     "imageUrl":"매 조회마다 발급하는 서명 URL","expires_at":"UTC ISO timestamp"}
+  ],
+  "recovery_required": false,
+  "error_code": null
+}
+존재하는 결과는 컷 4개/순서1~4를 유지한다. none은 preview_id=null, panels=[]다.
+패널 status: pending/ready/failed/unknown/rejected/mock.
+준비되지 않은 컷은 imageUrl/expires_at=null이며 캡션은 남는다.
+모든 컷 ready이면 ready, 일부 ready이면 partial, ready가 없으면 failed다.
+unknown이 있으면 error_code=COMIC_RESULT_UNKNOWN으로 확실한 실패와 구분한다.
+DB에 이미지 메타데이터만 있고 업로드 완료가 확인되지 않은 경우 recovery_required=true,
+error_code=COMIC_STORAGE_RECOVERY_REQUIRED(unknown도 있으면 UNKNOWN 우선)다.
+이 상태를 running/완료 예정으로 표시하지 않는다. 현재 실행기나 자동 복구가 없다.
+queued/running은 DTO의 예약 어휘이며 현재 어떤 경로에서도 출력하지 않는다.
+단순 반복 폴링/새 요청 ID로 재생성을 시도하면 안 된다.
+패널 status, none, UUID preview_id, null 처리, 오류/복구 필드는 FE 합의 전 후보이다.
+
+3. AI 계약 확인과 구현
+
+확인한 실제 소스:
+  AI 로컬 main5395d90의 visual_models.py, visual_story.py, image_data.py.
+  보유 Git 객체 fae1f0276f3ffccadf1fdce46b6f379a4f803ca9와 위3파일 diff 없음.
+  원격 최신 HEAD는 조회하지 않았으며 AI 파일을 수정하거나 fetch하지 않았다.
+
+ComicAIClient.plan(text, input_confirmed=True): POST /api/visual-story, format=comic4.
+ComicAIClient.render(plan, scene, scene_confirmed=True): POST /api/visual-story/image.
+두 확인 인자는 기본 false이며 명시 확인이 없으면 HTTP 요청 전에 거절한다.
+입력 원문 확인과 장면 글 확인은 서로 다르다. AI render도 별도로 confirmed=true를 요구한다.
+기존 requires_confirmation=true 초안이나 확인 화면 진입을 사용자 승인으로 바꾸지 않는다.
+HTTP 클라이언트는 현재 생성 API/앱 수명주기에서 실행하지 않는다. 향후 실행기가 호출할 어댑터다.
+
+6,000자·80개 원문 조각 한도를 절단 없이 검사한다. 일기 생성의 최대20,000자와 구분한다.
+AI와 같은 문장 끝 공백/줄바꿈 분리를 사용한다. 시각화 source_ids는 이 문장 조각의0-based 번호다.
+기존 일기 sources[].id(전체 대화 인덱스)를 전달하지 않는다.
+전체 원문·hash·출처/캡션·연속 번호·순서·커버리지·컷4개·반복 reuse_scene_id를 검증한다.
+짧은 일기는 기존 AI 규칙처럼 앞 장면 자산을 반복 참조하며 별도로 생성/업로드/서명하지 않는다.
+scene_key는 원문 hash/형식/출처 번호의 검증 키로만 사용한다. 호출 멱등키로 간주하지 않는다.
+HTTP200의 status=mock/failed/rejected는 실제 이미지 성공으로 처리하지 않는다.
+전송 후 timeout/연결 유실/서버5xx는 COMIC_RESULT_UNKNOWN이며 자동 재전송하지 않는다.
+프로토콜 오류/원문 불일치도 자동 재시도하지 않는다. 공급자 오류 원문/키/본문을 로그에 남기지 않는다.
+스트리밍 응답에 장면256KiB, 이미지14MiB+64KiB 상한을 둔다.
+
+4. 이미지·결과 저장과 복구
+
+엄격한 PNG/JPEG base64 data URL만 디코딩한다. 외부 URL 다운로드/리다이렉트는 없다.
+기존 drawing_images.validate_image를 재사용한다:
+  입력/정규화 출력10MiB, 변8192, 1600만 픽셀, 단일 프레임,
+  실제 형식·MIME 일치, verify/load, EXIF 회전·ICC 색상 보존, 메타데이터 제거, PNG 정규화.
+앱당 동시 디코딩2개·스레드 처리. 원본 그림 업로드 코드/DTO/최상위imageUrl 의미는 변경하지 않는다.
+
+persist_result는 이미 받은 AI plan/render 결과를 저장하는 미노출 서버 어댑터이다.
+API에서 호출하지 않으며 모델 호출/queue/worker가 아니다. None 결과는 unknown으로 보존한다.
+절차: 서버 초안 대조 → AI 결과 검증/이미지 정규화 → DB에 immutable 결과/pending 메타데이터
+→ private Storage upsert=false 업로드 → 자산 완료 RPC. UUID는 회원/세션/요청/자산 내용에 고정된다.
+반복 컷은 같은 자산을 참조한다. GET 시 고유 자산마다5분 URL을 한 번 발급한다.
+DB에는 URL/바이트를 저장하지 않는다. ready 자산은 새 URL을 조회할 때마다 발급한다.
+저장소 장애/서명 오류를 성공으로 위장하지 않는다. 서명 실패는 기존 DRAWING_READ_UNAVAILABLE이다.
+
+사용 Storage: 기존 diary-private(private) 버킷.
+키: {user_id}/{preview_id}/comic_scene/{asset_id}.png
+002의 기존 UUID/UUID/comic_scene/UUID.png restrictive/select 정책에 맞으며 수정하지 않는다.
+두 번째 UUID는 preview_id이다. 기존 일기/원본 키를 옮기거나 덮어쓰지 않는다.
+기존 DrawingRepository의 업로드·충돌 스트림 해시/크기 확인·서명 발급을 재사용한다.
+내부 DrawingAsset 반환의 asset_kind는 만화 API로 노출하지 않는다.
+
+같은 결과/바이트 재입력은 같은 자산 예약을 회수한다. 다른 결과를 같은 키로 보내면409.
+업로드 응답 유실은 같은 객체의 해시/크기 확인 후 완료한다. DB 완료 응답 유실은 저장 결과로 회수한다.
+recover_result_uploads는 DB 결과의 소유권을 JWT로 읽어 같은 이미지 바이트의 메타데이터를 대조한 뒤
+미완료 업로드만 복구한다. 새 앱/메모리 세션 없음에서도 작동하며 AI를 부르지 않는다.
+이 메서드도 HTTP에 노출하지 않았다. 호출자가 기존 바이트를 보관한 경우에만 가능하다.
+AI 응답 직후 DB/Storage 체크포인트 전 프로세스 유실로 바이트가 사라지면 복구를 보장하지 않는다.
+처음 DB 저장이 실패한 경우도 동일 결과 재입력이 있어야 복구한다. 자동 재생성/자동 정리는 없다.
+
+5. SQL 후보와 기존 스키마
+
+supabase/candidates/comic_previews_v1.sql: 표준 migrations 밖 독립 후보, 운영 미적용.
+신규3테이블: comic_previews(원문 snapshot·컷/자산 메타데이터), diary_comics(최종 연결),
+comic_attach_requests(회원별 요청 영수증).
+신규4함수: comic_panels_valid, save_comic_preview_result,
+complete_comic_preview_asset, attach_diary_comic.
+security invoker/빈 search_path/service_role 쓰기 전용, 회원 SELECT RLS, receipts는 서버 전용이다.
+2026-11-10 통합 전 검토에서 attach의 diaries FOR SHARE에 필요한 UPDATE(id) 권한을
+이 후보에 명시했다. 일반 회원 권한/기존001~005/일기 내용 갱신 경로는 변경하지 않는다.
+근거: https://www.postgresql.org/docs/current/sql-select.htm .
+owner 복합FK, 요청/일기/preview 고유 제약, 회원 advisory lock, 결과행 lock으로 충돌을 방어한다.
+첨부 조건의 원자성/실제 경합·롤백 보장은 PostgreSQL 실행 후 검증해야 한다.
+기존001~004·005·보상 SQL을 변경하지 않는다. migration005 자동 적용 경로도 추가하지 않는다.
+선택된 SESSION_STORE_MODE=supabase에서는005의 chat_sessions/chat_requests를 읽기만 한다.
+memory 기본 모드에서는005가 필요 없다. 결과/연결 스키마는005에 의존하지 않는다.
+
+기존 diary_assets는 diary_id NOT NULL/diary FK/owner+diary+종류+asset ID 고정 경로,
+장면/객체 고유 제약이 있어 저장 전 결과와 반복 컷의 같은 자산 참조를 그대로 넣을 수 없다.
+004는 pending을 original_drawing에만 허용한다. comic_scene은 enum 허용만으로 저장 전 업로드가
+지원되는 것이 아니다. 별도 결과/연결 테이블을 사용하여 기존 제약과 원본 의미를 보존했다.
+장기 미연결 결과의 보존 기간/사용량 상한/명시적 정리 정책은 미합의이며 삭제 기능도 없다.
+
+6. 남은 결정 — FE·AI 오경원 담당 확인
+
+FE/AI 공통: '그림일기 완성'이 일기 원문 확인과 AI가 만든 컷별 장면 글 확인 모두에
+해당하는가? 현재 AI는 plan과 render 각각 confirmed=true를 요구한다.
+해당한다면 FE가 어떤 명시적 증거를 어느 요청으로 전달·기록할지 합의해야 한다.
+해당하지 않으면 AI가 저장 전 미확인 preview를 별도 허용하는 계약 변경이 필요하다.
+이번 작업에서는 기존 AI API/기본값을 바꾸거나 확인값을 추정하지 않았다.
+FE: 신규 조회/첨부 응답 후보, UUID preview_id, partial/unknown/mock 표시,
+바이트 복구 필요 상태의 표시/재시도 정책, 일기 저장 성공 뒤 별도 만화 연결 실패 안내 합의.
+6,000자/80조각 초과 시 원본 저장을 허용하면서 만화를 생략하는 UX 합의.
+기존 저장 API는 확인 버튼 전 호출하지 않으며 만화 실패를 저장 실패로 합치지 않는다.
+
+최소 지속성 실행 방식 검토(미구현):
+  기존 Supabase에 별도 job/outbox + 컷별 dispatch/결과 체크포인트,
+  단일 Render 프로세스 수명주기 worker의 원자적 claim/token/기한·동시성 제한·시작 시 복구.
+  이미 전송된 호출이 재시작/기한 초과되면 unknown으로 격리하고 AI에 자동 재전송하지 않는다.
+  미전송 queued만 재개한다. DB 예약 직후 실제 실행 수단이 준비된 경우에만202를 허용한다.
+  Render 절전 중 worker는 실행할 수 없다. '다음 정상 기동 시 재개'와 지속 실행 보장을 구분한다.
+  이 방식도 AI 결과가 DB/Storage에 도달하기 전 유실되는 구간과 장시간 호출 취소/비용을
+  해결해야 한다. 현재 AI에는 서버 재조회 가능한 멱등 이미지 생성 job API가 없다.
+  항상 처리되는 SLA가 필요하면 기존 Supabase scheduler 사용 가능 여부/비용/권한과
+  인증된 깨우기 수단을 먼저 확인해야 한다. 현재 설정을 조회하거나 새 인프라를 만들지 않았다.
+확인 증거·worker 운영/재기동·결과 불명 처리·이미지 바이트 체크포인트 정책이 확정되기 전에는
+이 후보를 작업 큐로 표시하거나 생성 POST를 열지 않는다.
+
+7. 검증과 한계
+
+통합 전 최신 회귀는 보상 정책 신규13개 포함 전체890개 통과(16.19초), 실패/오류/skip0.
+만화 실행코드와 생성503는 보존했다. 아래877개는 최초 만화 구현 당시 결과다.
+실제 Supabase 적용 절차/worker와 FE·AI 후속 파일·함수는 docs/DB_INTEGRATION_PREP_20261110.txt 참조.
+최신 근거: ../../local-tools/be-integration-prep (오프라인 전체/XML/SQL/해시).
+
+최종 전체877개(기존770+신규107) 통과14.86초, 실패/오류/skip0. 통신/.env 차단시도0.
+세부 근거는 PROJECT_STATUS.md의 X 및
+../../local-tools/be-comics/be-tests.xml, test-summary.json에 기록한다.
+FakeDatabase/MockTransport Auth·AI·DB·Storage를 사용했다. 실제 .env·외부 통신 audit 차단.
+회귀는 BE .venv로 실행한다. 실제 신규 회원/실제 모델/운영 DB·Storage에 접속하지 않았다.
+통합 전 최신 SQL 구문은 기존 pglast8.7로25문/PLpgSQL4함수 파싱 성공(권한1문 추가). 실제 PostgreSQL 적용/실행 아님.
+카탈로그 바인딩, 실제 권한/RLS, 동시연결 경합/롤백/잠금 순서는 미검증이다.
+실제 PostgreSQL 도구는 PATH에서 발견되지 않았다. 새 설치/컨테이너/원격 검증 없음.
+Render Linux 메모리/절전/동시부하·실제 이미지 품질/지연·FE 통합/실제 서명 접근은 미검증이다.
+
+8. 파일과 Git
+
+기존 변경파일 중 app/main.py에만 만화 import3개·service 연결·router 연결을 추가했다.
+신규 실행파일6개:
+  app/comic_schemas.py, app/api/comics.py, app/clients/comic_ai.py,
+  app/clients/comics.py, app/services/comic_images.py, app/services/comics.py.
+신규 SQL1개·테스트4개:
+  supabase/candidates/comic_previews_v1.sql,
+  tests/fake_comics.py, tests/test_comic_ai.py, tests/test_comics.py, tests/test_comic_sql.py.
+현재 문서1개, Git 제외 PROJECT_STATUS.md 갱신.
+로컬 근거: ../../local-tools/be-comics (snapshot/오프라인 runner/SQL parser/XML/요약).
+기존 미커밋 작업/보상8 API·SQL/005·이메일 인증 테스트/FE·AI·배포 소스 보존.
+커밋·스테이징·푸시·PR·병합·운영 변경·배포·GitHub 댓글 게시 없음.
+정확한 시작/최종 상태·파일 해시는 ../../local-tools/be-comics/before.json, after.json 참조.
+
+9. GitHub 이슈 댓글 초안 — 미게시, 이슈 번호 미제공
+
+저장 전4컷 만화 BE 로컬 구현 후보를 추가했습니다.
+신규4경로에 기존 회원 인증을 적용하고, 서버 초안/버전 검증, 결과 조회,
+확정된 일기와의 원자적·멱등 연결, URL 재발급 및 기존 원본 그림 분리를 구현했습니다.
+AI 원문/hash/출처/반복 컷·HTTP200 비생성 상태와 이미지 바이트도 검증합니다.
+같은 이미지 바이트의 저장 복구와 재시작 후 결과 재조회는 Fake/Mock에서 확인했습니다.
+
+생성 POST는 현재503 COMIC_PREVIEW_NOT_ENABLED입니다.
+AI의 원문/장면 확인 confirmed 의미와 지속성 worker 운영 방식이 미합의여서
+거짓 confirmed나 실행 수단 없는202 queued를 반환하지 않습니다.
+검증·저장/조회·연결 코드는 준비했으며 실제 자동 생성 완료 구현으로 보고하지 않습니다.
+SQL은 supabase/candidates/comic_previews_v1.sql 별도 후보이고005·운영 DB를 바꾸지 않았습니다.
+FE에는 응답의 none/partial/패널 상태/복구 필드, AI 담당자에게는 저장 전 확인 의미 및
+6,000자/80조각 초과 처리·결과 불명 재생성 방지 계약의 확인이 필요합니다.
+최종 전체877개(기존770+신규107) 통과14.86초, 실패/오류/skip0. 실제 .env/외부 통신 차단시도0.
+실제 PostgreSQL·모델·Storage·FE/Render 통합과 배포는 미실행입니다.

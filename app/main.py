@@ -10,18 +10,21 @@ from app.api.edits import router as edit_router
 from app.clients.edits import EditRepository
 from app.services.edits import EditService
 from app.api.room import router as room_router
+from app.api.comics import router as comic_router
 from app.clients.ai import AIClient
 from app.clients.auth import AuthClient
 from app.clients.diaries import DiaryRepository
 from app.clients.drawings import DrawingRepository
 from app.clients.sessions import SessionRepository
 from app.clients.room import RoomRepository
+from app.clients.comics import ComicRepository
 from app.config import Settings
 from app.errors import install_error_handlers
 from app.services.chat import ChatService
 from app.services.diaries import DiaryService
 from app.services.drawings import DrawingService
 from app.services.room import RoomService
+from app.services.comics import ComicService
 from app.session_store import SessionStore
 from app.persistent_session_store import PersistentSessionStore
 
@@ -102,6 +105,7 @@ def create_app(settings: Settings | None = None,
             app.state.diary_service = DiaryService(store, repository, app.state.room_service)
             app.state.drawing_service = DrawingService(repository.drawings)
             app.state.edit_service = EditService(EditRepository(repository), repository.drawings)
+            app.state.comic_service = ComicService(store, ComicRepository(repository, repository.drawings))
             yield
 
     app = FastAPI(title="오늘,그리고 BE (잠정 API)", version="0.1.0", lifespan=lifespan)
@@ -109,6 +113,7 @@ def create_app(settings: Settings | None = None,
     app.include_router(diary_router)
     app.include_router(edit_router)
     app.include_router(room_router)
+    app.include_router(comic_router)
     install_error_handlers(app)
     app.add_middleware(
         CORSMiddleware,

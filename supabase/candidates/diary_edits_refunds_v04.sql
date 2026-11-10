@@ -56,6 +56,7 @@ grant update(confirmed_text,edit_version,updated_at,deleted_at,active_drawing_ed
 create policy edit_drawing_read_v04 on public.diary_edit_requests for select to authenticated
     using (user_id = (select auth.uid()) and (select auth.jwt()->>'is_anonymous') = 'false'
         and state = 'completed' and exists(select 1 from public.diaries d where d.id = diary_id and d.deleted_at is null));
+alter table public.diary_comics add column source_edit_version integer not null default 1 check (source_edit_version >= 1);
 
 create function public.member_diary_edit(p_user_id uuid, p_diary_id uuid, p_action text, p_payload jsonb)
 returns jsonb language plpgsql security invoker set search_path = ''
@@ -233,5 +234,50 @@ begin
     if not found then
         raise exception using errcode = '22023', message = 'invalid asset';
     end if;
+end;
+$function$;
+
+create or replace function public.attach_diary_comic(p_user_id uuid, p_diary_id uuid, p_preview_id uuid, p_request_id text)
+returns jsonb language plpgsql security invoker set search_path = ''
+as $function$
+declare
+    v public.comic_previews%rowtype;
+    d public.diaries%rowtype;
+    r public.comic_attach_requests%rowtype;
+    existing public.diary_comics%rowtype;
+begin
+    if p_request_id is null or p_request_id !~ '^[A-Za-z0-9_-]{1,128}$'
+        or not exists (select 1 from auth.users a where a.id = p_user_id
+        and a.is_anonymous is false and a.role = 'authenticated' and a.deleted_at is null)
+        then raise exception 'invalid owner or request'; end if;
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(p_user_id::text, 61));
+    select * into d from public.diaries where id = p_diary_id and user_id = p_user_id and deleted_at is null for share;
+    if not found then return jsonb_build_object('error','COMIC_PREVIEW_MISMATCH'); end if;
+    select * into v from public.comic_previews
+        where preview_id = p_preview_id and user_id = p_user_id for update;
+    if not found then return jsonb_build_object('error','COMIC_PREVIEW_NOT_FOUND'); end if;
+    select * into r from public.comic_attach_requests
+        where user_id = p_user_id and client_request_id = p_request_id;
+    if found and (r.diary_id <> p_diary_id or r.preview_id <> p_preview_id) then
+        return jsonb_build_object('error','IDEMPOTENCY_CONFLICT'); end if;
+    if d.edit_version <> 1 or d.confirmed_at is null or d.confirmation_fingerprint is null
+        or d.source_session_id <> v.session_id or d.source_history_revision <> v.history_revision
+        or d.ai_draft->>'draft_id' is distinct from v.draft_id
+        or d.ai_draft->>'text' is distinct from v.draft_text
+        or d.confirmed_text is distinct from v.draft_text then
+        return jsonb_build_object('error','COMIC_PREVIEW_MISMATCH'); end if;
+    if exists (select 1 from jsonb_array_elements(v.panels) p where p->>'outcome' = 'pending')
+        or not exists (select 1 from jsonb_array_elements(v.panels) p where p->>'outcome' = 'ready') then
+        return jsonb_build_object('error','COMIC_NOT_READY'); end if;
+    select * into existing from public.diary_comics
+        where diary_id = p_diary_id or preview_id = p_preview_id;
+    if found and (existing.diary_id <> p_diary_id or existing.preview_id <> p_preview_id) then
+        return jsonb_build_object('error','COMIC_ALREADY_ATTACHED'); end if;
+    insert into public.diary_comics(diary_id,user_id,preview_id)
+        values (p_diary_id,p_user_id,p_preview_id) on conflict (diary_id) do nothing;
+    insert into public.comic_attach_requests(user_id,client_request_id,diary_id,preview_id)
+        values (p_user_id,p_request_id,p_diary_id,p_preview_id)
+        on conflict (user_id,client_request_id) do nothing;
+    return to_jsonb(v) - array['result_fingerprint','created_at'];
 end;
 $function$;
