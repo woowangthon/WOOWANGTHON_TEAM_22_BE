@@ -29,6 +29,8 @@ class DiaryDetail(StrictModel):
     weather: Weather | None
     confirmed_text: str
     confirmed_at: datetime
+    edit_version: int = Field(default=1, ge=1)
+    updated_at: datetime
     ai_draft: DiaryDraft
     messages: list[SavedMessage]
     imageUrl: str | None = None

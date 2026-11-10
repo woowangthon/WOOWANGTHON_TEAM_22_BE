@@ -126,6 +126,19 @@ class DrawingRepository:
         except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError, AttributeError):
             raise AppError(503, "DRAWING_READ_UNAVAILABLE", "이미지 조회 실패", True) from None
 
+    async def edited_assets(self, owner_id, token, diary_id, request_id):
+        rows = await self.diaries._rows("/rest/v1/diary_edit_requests", token, {
+            "user_id": f"eq.{owner_id}", "diary_id": f"eq.{diary_id}",
+            "request_id": f"eq.{request_id}", "state": "eq.completed",
+            "select": "drawing", "limit": "2",
+        })
+        if len(rows) != 1:
+            raise invalid_response()
+        row = self.validate_row(rows[0].get("drawing"), owner_id, diary_id)
+        if row["upload_status"] != "ready":
+            raise invalid_response()
+        return [await self.signed_asset(row, token)]
+
     async def assets(self, owner_id, token, diary_id):
         rows = await self.rows(owner_id, token, diary_id)
         if len(rows) > 1:

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from app.diary_schemas import DiaryDetail, DiaryMonth, DiarySummary, SavedMessage
 from app.errors import AppError
 
-DETAIL_COLUMNS = "id,diary_date,weather,confirmed_text,confirmed_at,ai_draft"
+DETAIL_COLUMNS = "id,diary_date,weather,confirmed_text,confirmed_at,ai_draft,edit_version,updated_at,deleted_at,active_drawing_edit_id"
 
 
 def storage_unavailable() -> AppError:
@@ -55,6 +55,8 @@ class DiaryRepository:
             except ValueError:
                 pass
             if method == "POST" and response.status_code == 409 and code == "PT409":
+                if details == "DIARY_EDIT_VERSION_CONFLICT":
+                    raise AppError(409, "DIARY_EDIT_VERSION_CONFLICT", "수정 API로 현재 버전을 저장해 주세요.")
                 if details == "DRAWING_CONFLICT":
                     raise AppError(409, "DRAWING_ALREADY_EXISTS", "이미 저장된 그림")
                 # 요청 충돌 처리
@@ -63,6 +65,8 @@ class DiaryRepository:
                 # 날짜 중복 확인
                 if details == "DIARY_DATE_CONFLICT":
                     raise AppError(409, "DIARY_DATE_CONFLICT", "날짜 중복")
+            if method == "POST" and response.status_code == 404 and code == "PT404" and details == "DIARY_NOT_FOUND":
+                raise AppError(404, "DIARY_NOT_FOUND", "일기 없음")
             if response.status_code == 429 or response.status_code >= 500:
                 raise storage_unavailable()
             raise AppError(503, "DIARY_STORAGE_FAILED", "저장소 처리 실패")
@@ -121,13 +125,16 @@ class DiaryRepository:
             "select": "position,role,text", "order": "position.asc", "limit": "60",
         })
         try:
-            assets = (await self.drawings.assets(owner_id, token, diary_id)
+            assets = (await self.drawings.edited_assets(owner_id, token, diary_id, row["active_drawing_edit_id"])
+                      if self.drawings is not None and row.get("active_drawing_edit_id")
+                      else await self.drawings.assets(owner_id, token, diary_id)
                       if self.drawings is not None else [])
             return DiaryDetail.model_validate({
                 "diary_id": row["id"],
                 **{key: row[key] for key in (
                     "diary_date", "weather", "confirmed_text", "confirmed_at", "ai_draft",
                 )},
+                "edit_version": row["edit_version"], "updated_at": row["updated_at"],
                 "messages": [SavedMessage.model_validate(item) for item in messages],
                 "assets": assets, "imageUrl": assets[0].imageUrl if assets else None,
             }, strict=False)

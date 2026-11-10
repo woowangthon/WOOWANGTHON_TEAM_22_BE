@@ -6,6 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router
 from app.api.diaries import router as diary_router
+from app.api.edits import router as edit_router
+from app.clients.edits import EditRepository
+from app.services.edits import EditService
 from app.api.room import router as room_router
 from app.clients.ai import AIClient
 from app.clients.auth import AuthClient
@@ -98,11 +101,13 @@ def create_app(settings: Settings | None = None,
             )
             app.state.diary_service = DiaryService(store, repository, app.state.room_service)
             app.state.drawing_service = DrawingService(repository.drawings)
+            app.state.edit_service = EditService(EditRepository(repository), repository.drawings)
             yield
 
     app = FastAPI(title="오늘,그리고 BE (잠정 API)", version="0.1.0", lifespan=lifespan)
     app.include_router(router)
     app.include_router(diary_router)
+    app.include_router(edit_router)
     app.include_router(room_router)
     install_error_handlers(app)
     app.add_middleware(
@@ -110,7 +115,7 @@ def create_app(settings: Settings | None = None,
         allow_origins=list(settings.allowed_origins),
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Content-Type", "Authorization", "Idempotency-Key", "X-Request-ID"],
+        allow_headers=["Content-Type", "Authorization", "Idempotency-Key", "If-Match", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
     )
 

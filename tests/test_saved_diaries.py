@@ -80,7 +80,10 @@ class FakeDatabase:
                 assert params["order"] == "diary_date.asc"
                 rows.sort(key=lambda row: row["diary_date"])
             columns = params["select"].split(",")
-            return httpx.Response(200, json=[{key: row[key] for key in columns} for row in rows])
+            return httpx.Response(200, json=[{key: {
+                "edit_version": 1, "updated_at": row["confirmed_at"],
+                "deleted_at": None, "active_drawing_edit_id": None, **row,
+            }[key] for key in columns} for row in rows])
         assert request.url.path == "/rest/v1/diary_messages"
         assert params["order"] == "position.asc"
         diary_id = params["diary_id"].removeprefix("eq.")
@@ -113,6 +116,8 @@ class FakeDatabase:
             "confirmed_at": payload["p_confirmed_at"], "weather": payload["p_weather"],
             "source_client_request_id": payload["p_client_request_id"],
             "confirmation_fingerprint": payload["p_fingerprint"],
+            "edit_version": 1, "updated_at": payload["p_confirmed_at"],
+            "deleted_at": None, "active_drawing_edit_id": None,
         }
         # RPC 트랜잭션 실패 응답 모의
         if self.fail_message_insert:
