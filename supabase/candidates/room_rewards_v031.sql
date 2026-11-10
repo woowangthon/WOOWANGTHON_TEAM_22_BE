@@ -263,10 +263,15 @@ begin
         and u.is_anonymous is false and u.role = 'authenticated' and u.deleted_at is null) then
         raise exception using errcode = '22023', message = 'invalid member';
     end if;
-    if p_action is null or p_action not in ('get_room', 'sync_rewards') then
+    if p_action is null or p_action not in ('get_room', 'sync_rewards', 'list_items', 'purchase') then
         raise exception using errcode = '22023', message = 'invalid room action';
     end if;
-    v_keys := array[]::text[];
+    v_keys := case p_action
+        when 'purchase' then array['client_request_id', 'item_id']
+
+
+
+ else array[]::text[] end;
     if p_payload is null or pg_catalog.jsonb_typeof(p_payload) <> 'object'
         or not (p_payload ?& v_keys) or (p_payload - v_keys) <> '{}'::jsonb then
         raise exception using errcode = '22023', message = 'invalid room payload';
@@ -288,6 +293,16 @@ begin
     v_today := (v_now at time zone 'Asia/Seoul')::date;
     if p_action = 'get_room' then
         return public.room_snapshot(p_member_id, v_today);
+    elsif p_action = 'list_items' then
+        return pg_catalog.jsonb_build_object('items', coalesce((
+            select pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                'item_id', i.item_id, 'name', i.name, 'category', i.category,
+                'price_coins', i.price_coins, 'asset_key', i.asset_key, 'width', i.width, 'height', i.height,
+                'background_asset_key', i.background_asset_key, 'diary_cover_asset_key', i.diary_cover_asset_key,
+                'adult_tree_asset_key', i.adult_tree_asset_key,
+                'owned', exists (select 1 from public.member_owned_items o
+                    where o.member_id = p_member_id and o.item_id = i.item_id)) order by i.item_id)
+            from public.shop_items i where i.is_active), '[]'::jsonb));
     end if;
 
     insert into public.member_reward_wallets(member_id) values (p_member_id) on conflict do nothing;
@@ -309,6 +324,33 @@ begin
             water_drops = water_drops + v_count, updated_at = v_now where member_id = p_member_id;
         v_state := public.room_snapshot(p_member_id, v_today);
         return pg_catalog.jsonb_build_object('new_rewards', v_rewards, 'wallet', v_state->'wallet');
+    elsif p_action = 'purchase' then
+        select o.* into v_owned from public.member_owned_items o
+            where o.member_id = p_member_id and o.purchase_request_id = p_payload->>'client_request_id';
+        if found then
+            if v_owned.item_id <> p_payload->>'item_id' then
+                raise exception using errcode = 'PT409', message = 'request conflict', detail = 'IDEMPOTENCY_CONFLICT';
+            end if;
+        else
+            select i.* into v_item from public.shop_items i
+                where i.item_id = p_payload->>'item_id' and i.is_active for share;
+            if not found then
+                raise exception using errcode = 'PT404', message = 'item not found', detail = 'ITEM_NOT_FOUND';
+            end if;
+            if exists (select 1 from public.member_owned_items o
+                where o.member_id = p_member_id and o.item_id = v_item.item_id) then
+                raise exception using errcode = 'PT409', message = 'already owned', detail = 'ITEM_ALREADY_OWNED';
+            end if;
+            if v_wallet.coins < v_item.price_coins then
+                raise exception using errcode = 'PT409', message = 'insufficient coins', detail = 'INSUFFICIENT_COINS';
+            end if;
+            update public.member_reward_wallets set coins = coins - v_item.price_coins, updated_at = v_now
+                where member_id = p_member_id;
+            insert into public.member_owned_items(member_id, item_id, price_coins, purchase_request_id, purchased_at)
+                values (p_member_id, v_item.item_id, v_item.price_coins, p_payload->>'client_request_id', v_now);
+        end if;
+        v_state := public.room_snapshot(p_member_id, v_today);
+        return pg_catalog.jsonb_build_object('item_id', p_payload->>'item_id', 'owned', true, 'wallet', v_state->'wallet');
     end if;
     raise exception using errcode = '22023', message = 'unhandled room action';
 end;

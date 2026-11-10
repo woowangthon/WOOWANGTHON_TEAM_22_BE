@@ -15,6 +15,9 @@ class RewardSyncRequest(StrictModel):
     pass
 
 
+class PurchaseRequest(StrictModel):
+    client_request_id: RequestKey
+    item_id: ItemId
 
 
 
@@ -79,10 +82,28 @@ class RoomResponse(StrictModel):
     inventory: list[InventoryItem]
 
 
+class ShopItem(StrictModel):
+    item_id: ItemId
+    name: str
+    category: Category
+    price_coins: int = Field(ge=0)
+    asset_key: AssetKey | None
+    width: int | None
+    height: int | None
+    background_asset_key: AssetKey | None
+    diary_cover_asset_key: AssetKey | None
+    adult_tree_asset_key: AssetKey | None
+    owned: bool
 
 
+class ShopResponse(StrictModel):
+    items: list[ShopItem]
 
 
+class PurchaseResponse(StrictModel):
+    item_id: ItemId
+    owned: Literal[True]
+    wallet: Wallet
 
 
 

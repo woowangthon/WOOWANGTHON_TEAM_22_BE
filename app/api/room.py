@@ -6,7 +6,9 @@ from typing import Annotated
 from app.auth import MemberId
 from app.errors import AppError
 from app.room_schemas import (
-    ItemId, RewardSyncRequest, RewardSyncResponse, RoomResponse, )
+    ItemId, PurchaseRequest, PurchaseResponse,
+    RewardSyncRequest, RewardSyncResponse, RoomResponse, ShopResponse,
+    )
 
 class RoomRoute(APIRoute):
     def get_route_handler(self):
@@ -35,3 +37,13 @@ async def get_room(request: Request, member_id: MemberId):
 @router.post("/me/rewards/sync", response_model=RewardSyncResponse)
 async def sync_rewards(body: RewardSyncRequest, request: Request, member_id: MemberId):
     return await request.app.state.room_service.execute(member_id, "sync_rewards", body)
+
+
+@router.get("/shop/items", response_model=ShopResponse)
+async def shop_items(request: Request, member_id: MemberId):
+    return await request.app.state.room_service.execute(member_id, "list_items")
+
+
+@router.post("/shop/purchases", response_model=PurchaseResponse)
+async def purchase(body: PurchaseRequest, request: Request, member_id: MemberId):
+    return await request.app.state.room_service.execute(member_id, "purchase", body)

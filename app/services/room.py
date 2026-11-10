@@ -5,8 +5,8 @@ from pydantic import ValidationError
 
 from app.clients.room import RoomRepository, room_storage_unavailable
 from app.room_schemas import (
-    RewardSyncResponse, RoomResponse,
-    )
+    PurchaseResponse, RewardSyncResponse, RoomResponse,
+    ShopResponse, )
 
 
 class RoomService:
@@ -21,8 +21,8 @@ class RoomService:
                 raise room_storage_unavailable()
             return None
         schema = {
-            "get_room": RoomResponse,
-            "sync_rewards": RewardSyncResponse,
+            "get_room": RoomResponse, "list_items": ShopResponse,
+            "sync_rewards": RewardSyncResponse, "purchase": PurchaseResponse,
 
         }[action]
         try:

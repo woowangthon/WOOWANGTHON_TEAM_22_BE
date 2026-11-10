@@ -50,6 +50,23 @@ async def buy(client, key="chair", request_id="buy1"):
     return await client.post("/api/shop/purchases", json={"client_request_id": request_id, "item_id": key})
 
 
+async def test_empty_room_and_shop_are_readable_without_seeding_products_or_rewards():
+    async with room_api() as (client, db, app, ai):
+        result = await client.get("/api/me/room")
+        assert result.status_code == 200
+        body = result.json()
+        assert body == {
+            "as_of_date": "2026-11-10", "wallet": {"coins": 0, "water_drops": 0},
+            "room": {"width": 1440, "height": 900, "theme": {"item_id": None,
+                "background_asset_key": "room_default", "diary_cover_asset_key": "cover_default"}},
+            "tree": {"stage": 0, "max_stage": 7, "days_watered": 0, "watered_today": False, "asset_key": BASE_TREE[0]},
+            "inventory": [],
+        }
+        assert (await client.get("/api/shop/items")).json() == {"items": []}
+        assert (await client.post("/api/me/rewards/sync", json={})).json() == {
+            "new_rewards": [], "wallet": {"coins": 0, "water_drops": 0}}
+        assert not ai.requests and not db.items
+        assert result.headers["cache-control"] == "no-store"
 
 
 def diaries(db):
@@ -98,10 +115,55 @@ async def test_get_does_not_grant_and_new_confirmation_needs_no_date_setting():
         assert (await client.post("/api/me/rewards/sync", json={})).json()["wallet"] == {"coins": 30, "water_drops": 1}
 
 
+async def test_purchase_is_idempotent_and_separate_from_placement_and_theme():
+    async with room_api() as (client, db, app, ai):
+        db.items = {"chair": item(), "theme_snow": item("theme_snow", "theme", 20)}
+        db.member(MEMBER_A).coins = 100
+        first = await buy(client)
+        assert first.status_code == 200 and first.json() == {
+            "item_id": "chair", "owned": True, "wallet": {"coins": 70, "water_drops": 0}}
+        assert (await buy(client)).json() == first.json()
+        assert_error(await buy(client, request_id="different"), 409, "ITEM_ALREADY_OWNED")
+        assert_error(await buy(client, "theme_snow"), 409, "IDEMPOTENCY_CONFLICT")
+        assert (await buy(client, "theme_snow", "theme-buy")).status_code == 200
+        room = (await client.get("/api/me/room")).json()
+        assert room["room"]["theme"]["item_id"] is None
+        assert all(value["position"] is None for value in room["inventory"])
+        assert room["wallet"]["coins"] == 50
+        shop = (await client.get("/api/shop/items")).json()["items"]
+        assert all(value["owned"] for value in shop)
+        assert set(shop[0]) == {"item_id", "name", "category", "price_coins", "asset_key", "width", "height",
+                               "background_asset_key", "diary_cover_asset_key", "adult_tree_asset_key", "owned"}
+        # 판매 중지된 보유 상품의 동일 요청도 추가 차감 없이 복구된다.
+        db.items["chair"]["is_active"] = False
+        assert (await buy(client)).status_code == 200
+        assert len((await client.get("/api/shop/items")).json()["items"]) == 1
+        assert len((await client.get("/api/me/room")).json()["inventory"]) == 2
 
 
+@pytest.mark.parametrize("same_item,same_key", [(True, True), (True, False), (False, False), (False, True)])
+async def test_concurrent_purchases_from_two_app_instances_share_database_protection(same_item, same_key):
+    db = FakeRoomDatabase()
+    db.items = {"chair": item(), "lamp": item("lamp", "decoration")}
+    db.member(MEMBER_A).coins = 30
+    async with room_api(db) as (first, *_), room_api(db) as (second, *_):
+        results = await asyncio.gather(buy(first), buy(second, "chair" if same_item else "lamp", "buy1" if same_key else "buy2"))
+    assert sorted(result.status_code for result in results) == ([200, 200] if same_key and same_item else [200, 409])
+    state = db.member(MEMBER_A)
+    assert state.coins == 0 and len(state.owned) == 1
+    if not (same_item and same_key):
+        expected = "IDEMPOTENCY_CONFLICT" if same_key else "ITEM_ALREADY_OWNED" if same_item else "INSUFFICIENT_COINS"
+        assert [result.json()["error"]["code"] for result in results if result.status_code == 409] == [expected]
 
 
+async def test_unknown_inactive_and_unaffordable_products_do_not_mutate_wallet():
+    async with room_api() as (client, db, app, ai):
+        db.items["chair"] = item()
+        assert_error(await buy(client, "unknown"), 404, "ITEM_NOT_FOUND")
+        assert_error(await buy(client), 409, "INSUFFICIENT_COINS")
+        db.items["chair"]["is_active"] = False
+        assert_error(await buy(client), 404, "ITEM_NOT_FOUND")
+        assert db.member(MEMBER_A).coins == 0 and not db.member(MEMBER_A).owned
 
 
 
