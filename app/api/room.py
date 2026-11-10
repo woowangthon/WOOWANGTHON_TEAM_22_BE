@@ -6,7 +6,7 @@ from typing import Annotated
 from app.auth import MemberId
 from app.errors import AppError
 from app.room_schemas import (
-    ItemId, PlacementRequest, PlacementResponse, PurchaseRequest, PurchaseResponse,
+    RefundRequest, RefundResponse, ItemId, PlacementRequest, PlacementResponse, PurchaseRequest, PurchaseResponse,
     RewardSyncRequest, RewardSyncResponse, RoomResponse, ShopResponse,
     ThemeRequest, ThemeResponse, WaterRequest, WaterResponse,
 )
@@ -50,6 +50,9 @@ async def purchase(body: PurchaseRequest, request: Request, member_id: MemberId)
     return await request.app.state.room_service.execute(member_id, "purchase", body)
 
 
+@router.post("/shop/refunds", response_model=RefundResponse)
+async def refund(body: RefundRequest, request: Request, member_id: MemberId):
+    return await request.app.state.room_service.execute(member_id, "refund", body)
 
 
 @router.put("/me/room/placements/{item_id}", response_model=PlacementResponse)

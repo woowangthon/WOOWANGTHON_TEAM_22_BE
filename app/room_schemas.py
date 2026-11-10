@@ -113,8 +113,15 @@ class PurchaseResponse(StrictModel):
     wallet: Wallet
 
 
+class RefundRequest(PurchaseRequest):
+    pass
 
 
+class RefundResponse(StrictModel):
+    item_id: ItemId
+    refunded_coins: int = Field(ge=0)
+    owned: Literal[False]
+    wallet: Wallet
 
 
 class PlacementResponse(StrictModel):

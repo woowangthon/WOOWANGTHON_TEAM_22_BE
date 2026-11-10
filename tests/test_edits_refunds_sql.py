@@ -36,8 +36,27 @@ def test_atomic_finalization_receipt_and_active_revision_and_server_only_access(
     assert 'security definer' not in CODE and not re.search(r'grant[^;]*(?:insert|update|delete)[^;]*to authenticated', CODE)
 
 
+def test_purchase_refund_history_and_serial_wallet_mutations():
+    assert 'create table public.shop_purchase_receipts' in CODE
+    assert 'create table public.shop_refund_receipts' in CODE
+    assert 'purchase_id uuid not null unique' in CODE
+    assert 'unique(member_id, client_request_id)' in CODE
+    assert not re.search(r'(?:update|delete from) public\.shop_(?:purchase|refund)_receipts', CODE)
+    command = CODE.split('create or replace function public.member_room_command')[1]
+    assert command.index('pg_advisory_xact_lock') < command.index('for update')
+    assert 'coins=coins+v_purchase.price_paid' in command
+    assert 'delete from public.member_room_placements' in command
+    assert "detail='purchase_already_refunded'" in command
 
 
+def test_live_row_rls_storage_and_comic_version_tracking():
+    for name in ['diary_live_v04', 'messages_live_v04', 'assets_live_v04', 'comic_live_v04', 'drawing_storage_live_v04']:
+        assert f'create policy {name}' in CODE
+    for table in ['diary_edit_requests', 'diary_delete_requests', 'shop_purchase_receipts', 'shop_refund_receipts']:
+        assert f'alter table public.{table} enable row level security' in CODE
+    assert 'source_edit_version integer not null default 1' in CODE
+    assert 'if d.edit_version <> 1 or d.confirmed_at is null' in CODE
+    assert CODE.count("message='use edit api'") == 2
 
 
 def test_candidate_has_no_seed_or_session_migration_and_preserves_old_drawing_uniqueness():

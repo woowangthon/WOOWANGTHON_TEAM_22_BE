@@ -7,6 +7,8 @@ from app.errors import AppError
 
 
 DOMAIN_ERRORS = {
+    "ITEM_NOT_REFUNDABLE": (422, "환불할 수 없는 상품이에요."),
+    "PURCHASE_ALREADY_REFUNDED": (409, "이미 환불된 구매 요청이에요. 재구매에는 새 요청 ID가 필요해요."),
     "INSUFFICIENT_COINS": (409, "코인이 부족해요."),
     "INSUFFICIENT_WATER": (409, "물방울이 부족해요."),
     "ITEM_ALREADY_OWNED": (409, "이미 보유한 상품이에요."),

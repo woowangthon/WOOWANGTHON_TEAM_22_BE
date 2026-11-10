@@ -61,12 +61,49 @@ create table public.diary_delete_requests (
     foreign key(diary_id, user_id) references public.diaries(id, user_id) on delete restrict
 );
 
+create table public.shop_purchase_receipts (
+    purchase_id uuid primary key default gen_random_uuid(),
+    member_id uuid not null references auth.users(id) on delete restrict,
+    item_id text not null references public.shop_items(item_id) on delete restrict,
+    client_request_id text not null check (client_request_id ~ '^[A-Za-z0-9_-]{1,128}$'),
+    price_paid bigint not null check (price_paid >= 0),
+    purchased_at timestamptz not null,
+    unique(member_id, client_request_id),
+    unique(purchase_id, member_id, item_id)
+);
+insert into public.shop_purchase_receipts(member_id,item_id,client_request_id,price_paid,purchased_at)
+    select member_id,item_id,purchase_request_id,price_coins,purchased_at from public.member_owned_items;
+alter table public.member_owned_items add column purchase_id uuid;
+update public.member_owned_items o set purchase_id = r.purchase_id from public.shop_purchase_receipts r
+    where r.member_id = o.member_id and r.client_request_id = o.purchase_request_id;
+alter table public.member_owned_items alter column purchase_id set not null;
+alter table public.member_owned_items add constraint owned_purchase_v04_fk foreign key(purchase_id,member_id,item_id)
+    references public.shop_purchase_receipts(purchase_id,member_id,item_id) on delete restrict;
+
+create table public.shop_refund_receipts (
+    member_id uuid not null,
+    client_request_id text not null check (client_request_id ~ '^[A-Za-z0-9_-]{1,128}$'),
+    purchase_id uuid not null unique,
+    item_id text not null,
+    refunded_coins bigint not null check (refunded_coins >= 0),
+    refunded_at timestamptz not null,
+    response jsonb not null,
+    primary key(member_id, client_request_id),
+    foreign key(purchase_id,member_id,item_id) references public.shop_purchase_receipts(purchase_id,member_id,item_id) on delete restrict
+);
+
 alter table public.diary_edit_requests enable row level security;
 alter table public.diary_delete_requests enable row level security;
-revoke all on public.diary_edit_requests, public.diary_delete_requests from public, anon, authenticated, service_role;
+alter table public.shop_purchase_receipts enable row level security;
+alter table public.shop_refund_receipts enable row level security;
+revoke all on public.diary_edit_requests, public.diary_delete_requests,
+    public.shop_purchase_receipts, public.shop_refund_receipts from public, anon, authenticated, service_role;
 grant select on public.diary_edit_requests to authenticated;
-grant select, insert on public.diary_edit_requests, public.diary_delete_requests to service_role;
+grant select, insert on public.diary_edit_requests, public.diary_delete_requests,
+    public.shop_purchase_receipts, public.shop_refund_receipts to service_role;
 grant update(drawing,state,result) on public.diary_edit_requests to service_role;
+-- 영수증은 UPDATE/DELETE 권한을 부여하지 않는다. 활성 보유만 제거한다.
+grant delete on public.member_owned_items to service_role;
 grant update(confirmed_text,edit_version,updated_at,deleted_at,active_drawing_edit_id) on public.diaries to service_role;
 
 create policy diary_live_v04 on public.diaries as restrictive for select to authenticated
@@ -404,6 +441,42 @@ begin
 end;
 $function$;
 
+create or replace function public.room_snapshot(p_member_id uuid, p_on date) returns jsonb
+language sql stable security invoker set search_path = ''
+as $function$
+    select pg_catalog.jsonb_build_object(
+        'as_of_date', p_on,
+        'wallet', pg_catalog.jsonb_build_object(
+            'coins', coalesce(w.coins, 0), 'water_drops', coalesce(w.water_drops, 0)),
+        'room', pg_catalog.jsonb_build_object('width', 1440, 'height', 900,
+            'theme', pg_catalog.jsonb_build_object('item_id', s.active_theme_item_id,
+                'background_asset_key', coalesce(t.background_asset_key, 'room_default'),
+                'diary_cover_asset_key', coalesce(t.diary_cover_asset_key, 'cover_default'))),
+        'tree', pg_catalog.jsonb_build_object('stage', coalesce(g.growth_points, 0), 'max_stage', 7,
+            'days_watered', coalesce(g.growth_points, 0),
+            'watered_today', exists (select 1 from public.member_tree_watering_events e
+                where e.member_id = p_member_id and e.watered_on = p_on),
+            'asset_key', case when coalesce(g.growth_points, 0) < 7
+                then 'tree_stage_' || coalesce(g.growth_points, 0)::text
+                else coalesce(t.adult_tree_asset_key, 'tree_adult_default') end),
+        'inventory', coalesce((select pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                'item_id', i.item_id, 'name', i.name, 'category', i.category,
+                'asset_key', i.asset_key, 'width', i.width, 'height', i.height,
+                'refundable', i.category in ('furniture','decoration'),
+                'refund_coins', case when i.category in ('furniture','decoration') then o.price_coins else null end,
+                'position', case when p.item_id is null then null
+                    else pg_catalog.jsonb_build_object('x', p.x, 'y', p.y) end) order by i.item_id)
+            from public.member_owned_items o join public.shop_items i on i.item_id = o.item_id
+            left join public.member_room_placements p on p.member_id = o.member_id and p.item_id = o.item_id
+            where o.member_id = p_member_id), '[]'::jsonb)
+    )
+    from (values (p_member_id)) as m(member_id)
+    left join public.member_reward_wallets w on w.member_id = m.member_id
+    left join public.member_room_settings s on s.member_id = m.member_id
+    left join public.shop_items t on t.item_id = s.active_theme_item_id
+    left join public.member_tree_states g on g.member_id = m.member_id;
+$function$;
+
 create or replace function public.member_room_command(
     p_member_id uuid, p_action text, p_payload jsonb
 ) returns jsonb
@@ -415,6 +488,8 @@ declare
     v_keys text[];
     v_item public.shop_items%rowtype;
     v_owned public.member_owned_items%rowtype;
+    v_purchase public.shop_purchase_receipts%rowtype;
+    v_refund public.shop_refund_receipts%rowtype;
     v_event public.member_tree_watering_events%rowtype;
     v_wallet public.member_reward_wallets%rowtype;
     v_state jsonb;
@@ -429,11 +504,12 @@ begin
         raise exception using errcode = '22023', message = 'invalid member';
     end if;
     if p_action is null or p_action not in ('get_room', 'list_items', 'sync_rewards',
-        'purchase', 'place', 'remove_placement', 'theme', 'water') then
+        'purchase', 'refund', 'place', 'remove_placement', 'theme', 'water') then
         raise exception using errcode = '22023', message = 'invalid room action';
     end if;
     v_keys := case p_action
         when 'purchase' then array['client_request_id', 'item_id']
+        when 'refund' then array['client_request_id', 'item_id']
         when 'place' then array['item_id', 'x', 'y']
         when 'remove_placement' then array['item_id']
         when 'theme' then array['item_id']
@@ -495,32 +571,52 @@ begin
         v_state := public.room_snapshot(p_member_id, v_today);
         return pg_catalog.jsonb_build_object('new_rewards', v_rewards, 'wallet', v_state->'wallet');
     elsif p_action = 'purchase' then
-        select o.* into v_owned from public.member_owned_items o
-            where o.member_id = p_member_id and o.purchase_request_id = p_payload->>'client_request_id';
+        select * into v_purchase from public.shop_purchase_receipts where member_id=p_member_id
+            and client_request_id=p_payload->>'client_request_id';
         if found then
-            if v_owned.item_id <> p_payload->>'item_id' then
-                raise exception using errcode = 'PT409', message = 'request conflict', detail = 'IDEMPOTENCY_CONFLICT';
-            end if;
+            if v_purchase.item_id <> p_payload->>'item_id' then
+                raise exception using errcode='PT409',message='request conflict',detail='IDEMPOTENCY_CONFLICT'; end if;
+            if exists(select 1 from public.shop_refund_receipts where purchase_id=v_purchase.purchase_id) then
+                raise exception using errcode='PT409',message='purchase refunded',detail='PURCHASE_ALREADY_REFUNDED'; end if;
         else
-            select i.* into v_item from public.shop_items i
-                where i.item_id = p_payload->>'item_id' and i.is_active for share;
-            if not found then
-                raise exception using errcode = 'PT404', message = 'item not found', detail = 'ITEM_NOT_FOUND';
-            end if;
-            if exists (select 1 from public.member_owned_items o
-                where o.member_id = p_member_id and o.item_id = v_item.item_id) then
-                raise exception using errcode = 'PT409', message = 'already owned', detail = 'ITEM_ALREADY_OWNED';
-            end if;
+            select * into v_item from public.shop_items where item_id=p_payload->>'item_id' and is_active for share;
+            if not found then raise exception using errcode='PT404',message='item not found',detail='ITEM_NOT_FOUND'; end if;
+            if exists(select 1 from public.member_owned_items where member_id=p_member_id and item_id=v_item.item_id) then
+                raise exception using errcode='PT409',message='owned',detail='ITEM_ALREADY_OWNED'; end if;
             if v_wallet.coins < v_item.price_coins then
-                raise exception using errcode = 'PT409', message = 'insufficient coins', detail = 'INSUFFICIENT_COINS';
-            end if;
-            update public.member_reward_wallets set coins = coins - v_item.price_coins, updated_at = v_now
-                where member_id = p_member_id;
-            insert into public.member_owned_items(member_id, item_id, price_coins, purchase_request_id, purchased_at)
-                values (p_member_id, v_item.item_id, v_item.price_coins, p_payload->>'client_request_id', v_now);
+                raise exception using errcode='PT409',message='insufficient',detail='INSUFFICIENT_COINS'; end if;
+            insert into public.shop_purchase_receipts(member_id,item_id,client_request_id,price_paid,purchased_at)
+                values(p_member_id,v_item.item_id,p_payload->>'client_request_id',v_item.price_coins,v_now) returning * into v_purchase;
+            update public.member_reward_wallets set coins=coins-v_purchase.price_paid,updated_at=v_now where member_id=p_member_id;
+            insert into public.member_owned_items(member_id,item_id,price_coins,purchase_request_id,purchased_at,purchase_id)
+                values(p_member_id,v_item.item_id,v_purchase.price_paid,v_purchase.client_request_id,v_now,v_purchase.purchase_id);
         end if;
-        v_state := public.room_snapshot(p_member_id, v_today);
-        return pg_catalog.jsonb_build_object('item_id', p_payload->>'item_id', 'owned', true, 'wallet', v_state->'wallet');
+        v_state := public.room_snapshot(p_member_id,v_today);
+        return jsonb_build_object('item_id',p_payload->>'item_id','owned',true,'wallet',v_state->'wallet');
+    elsif p_action = 'refund' then
+        select * into v_refund from public.shop_refund_receipts where member_id=p_member_id
+            and client_request_id=p_payload->>'client_request_id';
+        if found then
+            if v_refund.item_id <> p_payload->>'item_id' then
+                raise exception using errcode='PT409',message='request conflict',detail='IDEMPOTENCY_CONFLICT'; end if;
+            return v_refund.response;
+        end if;
+        select * into v_owned from public.member_owned_items where member_id=p_member_id and item_id=p_payload->>'item_id' for update;
+        if not found then raise exception using errcode='PT409',message='not owned',detail='ITEM_NOT_OWNED'; end if;
+        select * into v_item from public.shop_items where item_id=v_owned.item_id for share;
+        if v_item.category not in ('furniture','decoration') then
+            raise exception using errcode='PT422',message='not refundable',detail='ITEM_NOT_REFUNDABLE'; end if;
+        select * into strict v_purchase from public.shop_purchase_receipts where purchase_id=v_owned.purchase_id
+            and member_id=p_member_id and item_id=v_owned.item_id;
+        -- 삭제되는 것은 활성 배치/보유뿐이다. 불변 구매와 환불 영수증은 남는다.
+        delete from public.member_room_placements where member_id=p_member_id and item_id=v_owned.item_id;
+        delete from public.member_owned_items where member_id=p_member_id and item_id=v_owned.item_id;
+        update public.member_reward_wallets set coins=coins+v_purchase.price_paid,updated_at=v_now where member_id=p_member_id;
+        v_state := public.room_snapshot(p_member_id,v_today);
+        v_state := jsonb_build_object('item_id',v_owned.item_id,'refunded_coins',v_purchase.price_paid,'owned',false,'wallet',v_state->'wallet');
+        insert into public.shop_refund_receipts(member_id,client_request_id,purchase_id,item_id,refunded_coins,refunded_at,response)
+            values(p_member_id,p_payload->>'client_request_id',v_purchase.purchase_id,v_owned.item_id,v_purchase.price_paid,v_now,v_state);
+        return v_state;
     elsif p_action in ('place', 'remove_placement', 'theme') then
         if p_payload->>'item_id' is not null then
             select i.* into v_item from public.shop_items i where i.item_id = p_payload->>'item_id' for share;

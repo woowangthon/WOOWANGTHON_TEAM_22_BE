@@ -201,12 +201,92 @@ async def refund(client, key="refund-1", product="chair"):
     return await client.post("/api/shop/refunds", json={"client_request_id": key, "item_id": product})
 
 
+async def test_purchase_refund_repurchase_history_price_and_replays():
+    async with api() as (client, db, storage):
+        room = db.room
+        room.items = {"chair": item(price=60), "theme": item("theme", "theme", price=30)}
+        state = room.member(MEMBER_A)
+        state.coins, state.water = 200, 1
+        assert (await purchase(client)).status_code == 200
+        assert (await client.put("/api/me/room/placements/chair", json={"x": 1, "y": 2})).status_code == 200
+        room.items["chair"]["price_coins"] = 90
+        inventory = (await client.get("/api/me/room")).json()["inventory"][0]
+        assert inventory["refund_coins"] == 60 and inventory["refundable"] is True
+        first = await refund(client)
+        assert first.json() == {"item_id": "chair", "refunded_coins": 60, "owned": False,
+                                "wallet": {"coins": 200, "water_drops": 1}}
+        assert not state.owned and not state.placements
+        assert (await client.get("/api/shop/items")).json()["items"][0]["owned"] is False
+        assert_error(await purchase(client), 409, "PURCHASE_ALREADY_REFUNDED")
+        assert (await purchase(client, "buy-2")).status_code == 200
+        state = room.member(MEMBER_A)
+        assert state.coins == 110
+        assert (await refund(client)).json() == first.json()
+        assert state.coins == 110 and "chair" in state.owned
+        second = await refund(client, "refund-2")
+        assert second.json()["refunded_coins"] == 90
+        state = room.member(MEMBER_A)
+        assert state.coins == 200 and state.water == 1
+        assert len(state.purchases) == len(state.refunds) == 2
+        assert_error(await refund(client, "refund-3"), 409, "ITEM_NOT_OWNED")
+        assert_error(await refund(client, product="theme"), 409, "IDEMPOTENCY_CONFLICT")
 
 
+@pytest.mark.parametrize("category", ["furniture", "decoration", "theme"])
+async def test_refund_categories_and_foreign_inventory(category):
+    async with api() as (client, db, storage):
+        db.room.items["chair"] = item(category=category)
+        db.room.member(MEMBER_A).coins = 100
+        assert (await purchase(client)).status_code == 200
+        inventory = (await client.get("/api/me/room")).json()["inventory"][0]
+        assert inventory["refundable"] == (category != "theme")
+        assert inventory["refund_coins"] == (None if category == "theme" else 30)
+        client.headers["Authorization"] = "Bearer fake-member-b"
+        assert_error(await refund(client), 409, "ITEM_NOT_OWNED")
+        client.headers["Authorization"] = "Bearer fake-member-a"
+        result = await refund(client)
+        if category == "theme":
+            assert_error(result, 422, "ITEM_NOT_REFUNDABLE")
+            assert (await client.put("/api/me/room/theme", json={"item_id": "chair"})).status_code == 200
+        else:
+            assert result.status_code == 200
 
 
+@pytest.mark.parametrize("failure", ["rollback", "lost", "concurrent"])
+async def test_refund_failures_and_two_apps_never_duplicate_coins(failure):
+    db = EditDatabase()
+    db.room.items["chair"] = item()
+    db.room.member(MEMBER_A).coins = 100
+    async with api(db) as (client, _, _), api(db) as (other, _, _):
+        assert (await purchase(client)).status_code == 200
+        if failure == "rollback":
+            db.room.fail_during = "refund"
+        elif failure == "lost":
+            db.room.lose_response = "refund"
+        else:
+            replies = await asyncio.gather(refund(client), refund(other), refund(other, "different"))
+            assert sum(r.status_code == 200 for r in replies) >= 1
+        if failure != "concurrent":
+            assert (await refund(client)).status_code == 503
+            assert db.room.member(MEMBER_A).coins == (70 if failure == "rollback" else 100)
+        db.room.fail_during = None
+        assert (await refund(other)).status_code == 200
+        state = db.room.member(MEMBER_A)
+        assert state.coins == 100 and len(state.refunds) == 1
 
 
+@pytest.mark.parametrize("route", ["edit", "delete", "refund"])
+async def test_new_routes_require_authentication(route):
+    async with api() as (client, db, storage):
+        client.headers.pop("Authorization")
+        if route == "edit":
+            result = await edit(client, uuid4())
+        elif route == "delete":
+            result = await client.delete(f"/api/diaries/{uuid4()}", headers=delete_headers())
+        else:
+            result = await refund(client)
+        assert result.status_code == 401
+        assert not db.edits and not db.deletes and not db.room.requests
 
 
 async def test_conflicting_pending_edit_never_changes_visible_drawing_and_corrupt_blob_blocks_finish():
@@ -263,6 +343,17 @@ async def test_deferred_first_reward_survives_delete_and_legacy_day_cannot_be_by
         assert wallet == {"coins": 0 if legacy else 30, "water_drops": 0 if legacy else 1}
 
 
+async def test_purchase_and_refund_in_flight_use_one_serial_order():
+    db = EditDatabase()
+    db.room.items["chair"] = item()
+    db.room.member(MEMBER_A).coins = 100
+    async with api(db) as (client, _, _), api(db) as (other, _, _):
+        bought, refunded = await asyncio.gather(purchase(client), refund(other))
+        assert bought.status_code == 200
+        assert refunded.status_code in {200, 409}
+        state = db.room.member(MEMBER_A)
+        assert (state.coins, "chair" in state.owned) in {(100, False), (70, True)}
+        assert len(state.purchases) == 1 and len(state.refunds) <= 1
 
 
 @pytest.mark.parametrize("kind", ["duplicate", "missing", "json", "empty_file_field"])
