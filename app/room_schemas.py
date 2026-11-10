@@ -29,6 +29,8 @@ class ThemeRequest(StrictModel):
     item_id: ItemId | None
 
 
+class WaterRequest(StrictModel):
+    client_request_id: RequestKey
 
 
 class Wallet(StrictModel):
@@ -120,8 +122,15 @@ class PlacementResponse(StrictModel):
     position: Position
 
 
+class ThemeResponse(StrictModel):
+    theme: Theme
+    tree: Tree
 
 
+class WaterResponse(StrictModel):
+    watered_on: date
+    wallet: Wallet
+    tree: Tree
 
 
 class DiaryReward(StrictModel):

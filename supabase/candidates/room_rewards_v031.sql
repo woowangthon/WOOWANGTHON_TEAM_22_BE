@@ -263,15 +263,16 @@ begin
         and u.is_anonymous is false and u.role = 'authenticated' and u.deleted_at is null) then
         raise exception using errcode = '22023', message = 'invalid member';
     end if;
-    if p_action is null or p_action not in ('get_room', 'sync_rewards', 'list_items', 'purchase', 'place', 'remove_placement') then
+    if p_action is null or p_action not in ('get_room', 'list_items', 'sync_rewards',
+        'purchase', 'place', 'remove_placement', 'theme', 'water') then
         raise exception using errcode = '22023', message = 'invalid room action';
     end if;
     v_keys := case p_action
         when 'purchase' then array['client_request_id', 'item_id']
         when 'place' then array['item_id', 'x', 'y']
         when 'remove_placement' then array['item_id']
-
- else array[]::text[] end;
+        when 'theme' then array['item_id']
+        when 'water' then array['client_request_id'] else array[]::text[] end;
     if p_payload is null or pg_catalog.jsonb_typeof(p_payload) <> 'object'
         or not (p_payload ?& v_keys) or (p_payload - v_keys) <> '{}'::jsonb then
         raise exception using errcode = '22023', message = 'invalid room payload';
@@ -351,7 +352,7 @@ begin
         end if;
         v_state := public.room_snapshot(p_member_id, v_today);
         return pg_catalog.jsonb_build_object('item_id', p_payload->>'item_id', 'owned', true, 'wallet', v_state->'wallet');
-    elsif p_action in ('place', 'remove_placement') then
+    elsif p_action in ('place', 'remove_placement', 'theme') then
         if p_payload->>'item_id' is not null then
             select i.* into v_item from public.shop_items i where i.item_id = p_payload->>'item_id' for share;
             if not found then
@@ -361,6 +362,17 @@ begin
                 where o.member_id = p_member_id and o.item_id = v_item.item_id) then
                 raise exception using errcode = 'PT409', message = 'item not owned', detail = 'ITEM_NOT_OWNED';
             end if;
+        end if;
+        if p_action = 'theme' then
+            if v_item.item_id is not null and v_item.category <> 'theme' then
+                raise exception using errcode = 'PT404', message = 'theme not found', detail = 'ITEM_NOT_FOUND';
+            end if;
+            insert into public.member_room_settings(member_id, active_theme_item_id, updated_at)
+                values (p_member_id, p_payload->>'item_id', v_now)
+                on conflict (member_id) do update set active_theme_item_id = excluded.active_theme_item_id,
+                    updated_at = excluded.updated_at;
+            v_state := public.room_snapshot(p_member_id, v_today);
+            return pg_catalog.jsonb_build_object('theme', v_state->'room'->'theme', 'tree', v_state->'tree');
         end if;
         if v_item.category not in ('furniture', 'decoration') then
             raise exception using errcode = 'PT422', message = 'not placeable', detail = 'ITEM_NOT_PLACEABLE';
@@ -383,6 +395,29 @@ begin
             values (p_member_id, v_item.item_id, v_x, v_y, v_now)
             on conflict (member_id, item_id) do update set x = excluded.x, y = excluded.y, updated_at = excluded.updated_at;
         return pg_catalog.jsonb_build_object('item_id', v_item.item_id, 'position', pg_catalog.jsonb_build_object('x', v_x, 'y', v_y));
+    elsif p_action = 'water' then
+        select e.* into v_event from public.member_tree_watering_events e
+            where e.member_id = p_member_id and e.client_request_id = p_payload->>'client_request_id';
+        if not found then
+            insert into public.member_tree_states(member_id) values (p_member_id) on conflict do nothing;
+            select g.growth_points into v_stage from public.member_tree_states g where g.member_id = p_member_id for update;
+            if v_stage >= 7 then
+                raise exception using errcode = 'PT409', message = 'full grown', detail = 'TREE_FULL_GROWN';
+            end if;
+            if exists (select 1 from public.member_tree_watering_events e
+                where e.member_id = p_member_id and e.watered_on = v_today) then
+                raise exception using errcode = 'PT409', message = 'already watered', detail = 'TREE_ALREADY_WATERED_TODAY';
+            end if;
+            if v_wallet.water_drops < 1 then
+                raise exception using errcode = 'PT409', message = 'insufficient water', detail = 'INSUFFICIENT_WATER';
+            end if;
+            update public.member_reward_wallets set water_drops = water_drops - 1, updated_at = v_now where member_id = p_member_id;
+            update public.member_tree_states set growth_points = growth_points + 1, updated_at = v_now where member_id = p_member_id;
+            insert into public.member_tree_watering_events(member_id, client_request_id, watered_on, created_at)
+                values (p_member_id, p_payload->>'client_request_id', v_today, v_now) returning * into v_event;
+        end if;
+        v_state := public.room_snapshot(p_member_id, v_today);
+        return pg_catalog.jsonb_build_object('watered_on', v_event.watered_on, 'wallet', v_state->'wallet', 'tree', v_state->'tree');
     end if;
     raise exception using errcode = '22023', message = 'unhandled room action';
 end;

@@ -8,7 +8,8 @@ from app.errors import AppError
 from app.room_schemas import (
     ItemId, PlacementRequest, PlacementResponse, PurchaseRequest, PurchaseResponse,
     RewardSyncRequest, RewardSyncResponse, RoomResponse, ShopResponse,
-    ThemeRequest, )
+    ThemeRequest, ThemeResponse, WaterRequest, WaterResponse,
+)
 
 class RoomRoute(APIRoute):
     def get_route_handler(self):
@@ -62,8 +63,14 @@ async def remove_placement(item_id: ItemPath, request: Request, member_id: Membe
     return Response(status_code=204)
 
 
+@router.put("/me/room/theme", response_model=ThemeResponse)
+async def theme(body: ThemeRequest, request: Request, member_id: MemberId):
+    return await request.app.state.room_service.execute(member_id, "theme", body)
 
 
+@router.post("/me/tree/water", response_model=WaterResponse)
+async def water(body: WaterRequest, request: Request, member_id: MemberId):
+    return await request.app.state.room_service.execute(member_id, "water", body)
 
 
 class _Item(ThemeRequest):
