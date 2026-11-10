@@ -89,7 +89,7 @@ AI 서버 상태를 검사하는 경로는 아닙니다. API 문서는 `/docs`�
 ### 선택형 세션 영속화 — 005 로컬 후보
 
 `SESSION_STORE_MODE=memory`가 기본값입니다. 기존 배포는 이 기본값으로 유지할 수 있습니다.
-`supabase/migrations/20261109000500_persist_chat_sessions.sql`은 **원격 미적용 로컬 후보**입니다.
+`supabase/candidates/session_persistence_v005.sql`은 **원격 미적용 로컬 후보**입니다.
 실제 PostgreSQL RPC·RLS·트랜잭션·동시성을 검증한 뒤에만 `supabase` 모드를 선택합니다.
 이번 구현에는 시작 시 자동 migration, 전체 회원 세션 적재, 메모리/DB 사이 자동 이관이 없습니다.
 

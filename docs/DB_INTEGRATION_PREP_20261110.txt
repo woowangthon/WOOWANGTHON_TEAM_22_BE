@@ -65,7 +65,7 @@ FE는 지갑 응답을 기준으로 잔액을 갱신해야 한다. 기존 JSON �
 001 diaries/id+user_id 복합키·Auth FK·회원 SELECT RLS, 002 private Storage,
 003 confirmation_fingerprint·서버 확정 RPC·auth/service 권한, 004 원본 업로드를 기준으로 검토했다.
 
-A. supabase/migrations/20261109000500_persist_chat_sessions.sql
+A. supabase/candidates/session_persistence_v005.sql
   chat_sessions/chat_requests 2테이블, reserve_chat_request/transition_chat_request/
   confirm_chat_session_diary 3함수. 003 confirm_member_diary를 호출한다.
   회원 직접 SELECT/쓰기/RPC 불가, INVOKER·빈 search_path, 서버 역할 전용.
@@ -222,7 +222,7 @@ README/chat/세션 구현·005/이메일 테스트/만화 실행코드/사용자
   1) 세션 영속화:
      app/clients/sessions.py, app/persistent_session_store.py, app/services/chat.py,
      app/services/diaries.py의 PersistentSessionStore/import·confirm 분기만,
-     supabase/migrations/20261109000500_persist_chat_sessions.sql,
+     supabase/candidates/session_persistence_v005.sql,
      tests/fake_sessions.py, tests/test_session_persistence.py, tests/test_session_migration.py,
      README.md의 세션 설명, config의 session_store_mode, env의 SESSION_STORE_MODE,
      main의 session imports·factory 인자·store 선택 부분.

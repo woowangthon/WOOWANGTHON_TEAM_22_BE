@@ -4,7 +4,7 @@ import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-CANDIDATE = ROOT / "supabase/migrations/20261109000500_persist_chat_sessions.sql"
+CANDIDATE = ROOT / "supabase/candidates/session_persistence_v005.sql"
 SQL = CANDIDATE.read_text(encoding="utf-8")
 CODE = re.sub(r"--[^\n]*", "", SQL).lower()
 
