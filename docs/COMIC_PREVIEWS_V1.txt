@@ -5,6 +5,57 @@
 삭제 일기 제외 및 v0.4 SQL 의존성은 DIARY_EDITS_REFUNDS_V04.txt를 함께 따른다.
 자동 생성 POST는 계속 503 보류이며, 이번 Git 정리로 활성화하거나 DB에 적용하지 않는다.
 
+2026-11-11 2차 연결 전 재점검 — 아래 과거 검증 수치보다 이 항목이 최신이다.
+
+실제 BE app/api/comics.py, comic_schemas.py, clients/comic_ai.py·comics.py,
+services/comics.py·comic_images.py, SQL comic/v0.4를 다시 대조했다.
+BE 전체963개 통과, 격리 Render 후보의 기존 AI/BE 계약201개 통과. 만화 실제 생성은 미실행이다.
+이번에는 AI 담당자의 신규 소스/원격 최신 상태를 확인하지 않았다. 아래3절의 AI SHA 대조는 과거 기록이다.
+현재 배포 보존본 AI fae1f02와 신규 BE 후보의 텍스트 흐름만 MockTransport로 재검증했다.
+FE용 전체 route/DTO/오류 참조는 FE_API_CONTRACT_PHASE2.txt 6절을 함께 사용한다.
+
+AI 담당자 확인용 입력·출력 표(현재 BE 어댑터가 기대하는 형식이며 새 합의 아님):
+  plan POST /api/visual-story
+    요청 {"diary_text":string,"confirmed":true,"format":"comic4"}
+    응답 {diary_text:string,diary_hash:hex64,sources:[{id:int0~79,text:string}],storybook:null,
+      comic4:{format:"comic4",layout:"grid_2x2",planning_mode:"model"|"deterministic"|"fallback"|"mock",
+        scenes:[{scene_id:string,order:int1~4,caption:string,source_ids:int[],imageUrl:null,
+                 repeated:bool,reuse_scene_id:string|null}],notices:string[]},
+      requires_confirmation:true,mock:bool}
+    scenes는 정확히4개, notices는최대20개, repeated/reuse_scene_id는 기본false/null 허용.
+  render POST /api/visual-story/image
+    요청 {diary_text:string,diary_hash:hex64,format:"comic4",source_ids:int[],confirmed:true}
+    응답 {diary_hash:hex64,scene_key:hex64,caption:string,source_ids:int[],format:"comic4",
+      imageUrl:string|null,status:"generated"|"rejected"|"failed"|"mock",
+      error?:string|null,requires_confirmation:true,mock:bool}
+    imageUrl은 generated일 때 실제 PNG/JPEG base64 data URL이어야 저장할 수 있다.
+    외부 임시 HTTPS URL을 받아 내려받는 기능은 없다. 응답 imageUrl:null 또는 status=mock은 성공 이미지가 아니다.
+  diary_text는 서버에 있는 초안 원문이며 FE가 임의 본문을 생성 요청에 추가할 수 없다.
+  현재 BE 생성 요청에는 input_confirmed/scene_confirmed 증거 필드가 없다.
+    원문 확인과 각 장면 확인의 의미·누가 언제 어떤 버전에 확인했는지 전달/보존 방법은 AI 담당자 확인 필요.
+    plan/render 내부 플래그를 임의로 true로 세팅하거나 일기 저장 버튼과 동일한 증거로 간주하지 않는다.
+  길이: 일반 일기20000자, 만화6000자 및 분리된 원문80조각. 초과 원문 절단/재작성 없음.
+    초과 시 만화 생략/안내와 원본 저장 유지 UX는 FE·AI 담당자 확인 필요.
+  실패: connect 전 실패503, 전송 후 timeout504/5xx502는 COMIC_RESULT_UNKNOWN.
+    unknown을 실패로 확정하거나 자동 재호출하지 않는다. 같은 scene_key가 AI 멱등키라는 보장도 없다.
+  부분성공: 네 컷 메타데이터를 보존하고 ready만 서명한다. 반복 컷은 같은 자산을 재사용한다.
+    일부ready+pending없음이면 partial 연결 가능. pending이 있거나 ready0개면 attach409다.
+    부분성공 저장/비용/사용자 재시도 UX는 AI·FE 담당자 확인 필요.
+  장시간 작업: 실제 job/queue/worker/claim/기동 복구가 없다. DB 결과 저장 함수는 실행기가 아니다.
+    생성 응답 바이트 체크포인트/재시작 시 복구·unknown 조회 수단은 AI 담당자 확인 필요.
+  버전: 저장 전 session_id/history_revision/draft_id/text를 저장 후 일기 원본과 맞춘다.
+    v0.4 첨부는 edit_version1만 허용, source_edit_version1 기록. 일기 수정 후 current/stale만 진단한다.
+    수정된 본문 기준 재생성/만화 교체 API는 현재 없다. AI 담당자 확인 필요이며 이번에 임의 추가하지 않았다.
+  Storage: diary-private/{user_uuid}/{preview_uuid}/comic_scene/{asset_uuid}.png,
+    upsert=false→해시확인→ready, URL은조회시300초. 기존 원본그림은 별도 보존한다.
+  삭제: 일기 comics는404지만 세션preview/기발급URL까지 즉시 제거하지 않는다.
+    미연결preview/비활성 이미지 보존기한과 영구삭제 정책은 미합의다.
+
+활성화 차단 조건: 위 확인 증거 계약, 실제 실행/바이트복구 수단, AI 응답 계약,
+실제 PostgreSQL·Storage 검증이 준비되기 전까지 COMIC_PREVIEW_NOT_ENABLED(503,
+retryable=false)를 유지한다. 만화 실패 때문에 기존 일기 확정·그림 저장을 막지 않는다.
+실제 모델 품질·시간·비용·서명URL·FE 화면 검증은 이번 결과에 포함하지 않는다.
+
 1. 구현 범위와 API 상태
 
 POST /api/chat-sessions/{session_id}/comic-previews

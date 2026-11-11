@@ -1,0 +1,238 @@
+오늘,그리고 — 2차 FE 연결용 실제 BE API 참조
+2026-11-11 Asia/Seoul / feat/be-bootstrap / 실행코드 기준 10663b10
+
+0. 범위와 계약 상태
+
+이 문서는 app/api/*.py, *_schemas.py, clients/services, v0.4 SQL 후보를 대조한 구현 참조다.
+운영 제공·FE 연결 완료를 뜻하지 않는다. 신규 DB 후보는 운영 미적용이며 실통합은 미검증이다.
+기존 사용자 요청/문서 기준: 서울 날짜 최초 일기30코인/물방울1개, 날짜별 중복 방지,
+1440×900 좌상단 정수 좌표, 누적7회 성장, 실제 구매가 환불, 테마 영구 보유.
+2차 FE 담당자의 수락은 아직 확인하지 않았다. 만화 응답/확인 증거는 특히 잠정 계약이다.
+삭제 후 기지급 미회수는 현재 구현이며 기존 문서상 운영 전 최종 확인 대상으로 남아 있다.
+본문에서는 구현 사실과 후속 결정 사항을 구분한다. FE 저장소는 변경하지 않았다.
+
+1. 공통 규칙
+
+모든 /api 경로는 Authorization: Bearer <Supabase 회원 access_token>이 필수다.
+회원가입/로그인/이메일 확인은 기존 Supabase Auth 경로다. BE 회원가입 API는 없다.
+BE는 /auth/v1/user로 UUID/is_anonymous=false/role=aud=authenticated를 검사한다.
+email_confirmed_at을 별도 강제하지 않는다. 운영 Email/SMTP/Redirect 설정은 미확인이다.
+회원 ID·권한·잔액·보상 날짜는 FE 입력으로 정하지 않는다. Secret key를 FE에 두지 않는다.
+GET /health만 인증 없이200 {"status":"ok"}; DB/RPC 준비 여부를 검사하는 health가 아니다.
+
+JSON 요청은 Content-Type: application/json, {}라고 명시한 요청도 본문이 필요하다.
+JSON 추가 필드 금지, int/bool/string은 엄격히 구분한다. null 허용은 아래 명시한 경우뿐이다.
+multipart는 브라우저 FormData로 보내고 Content-Type/boundary를 직접 지정하지 않는다.
+DELETE 및 GET은 별도 body 없음. DELETE204를 JSON으로 파싱하지 않는다.
+허용 CORS method GET/POST/PUT/DELETE, header Content-Type/Authorization/Idempotency-Key/
+If-Match/X-Request-ID. 응답 X-Request-ID 노출, Cache-Control:no-store, 쿠키 인증 없음.
+응답 request ID는 서버가 생성한다. X-Request-ID는 멱등키가 아니다.
+
+식별자:
+  request_key = ASCII 영문/숫자/_/- 1~128자. client_request_id, client_message_id,
+                Idempotency-Key 및 item_id에 같은 문법을 사용한다.
+  item_id = 상점 응답에서 얻는 문자열. UUID라고 가정하지 않는다.
+  session_id = ses_ + 소문자 hex32; draft_id = draft_ + 소문자 hex32.
+  diary_id/preview_id/asset_id = UUID 문자열. session_id/diary_id를 서로 바꿔 쓰지 않는다.
+  history_revision = 대화 버전; edit_version = 확정 일기 수정 버전. 서로 별개다.
+날짜는 YYYY-MM-DD, 달력 month는 YYYY-MM, 시각은 timezone 포함 ISO8601 문자열이다.
+diary_date는 BE의 확정 시각을 Asia/Seoul로 변환해 DB가 정한다. UTC 날짜로 재계산하지 않는다.
+room.as_of_date/물주기 날짜는 회원 잠금을 얻은 뒤 실제 서울 처리일이다.
+보상은 sync 처리일이 아닌 원래 diary_date별 1회다.
+
+2. 경로 목록 — 실제 route 기준
+
+아래 요청 필드는 모두 필수이며 ?만 선택이다. 모든 성공은 명시한 status를 따른다.
+응답 타입의 전체 필드/자료형은 3~6절에 있다.
+
+Method | Path | 요청 | 성공 응답
+POST | /api/chat-sessions | {} + Idempotency-Key:request_key | 201 Session
+POST | /api/chat-sessions/{session_id}/messages | {client_message_id:request_key,text:string(1~2000)} | 200 Message
+POST | /api/chat-sessions/{session_id}/diary-draft | {client_request_id:request_key,history_revision:int>=0} | 200 DraftResult
+POST | /api/chat-sessions/{session_id}/diaries | {client_request_id:request_key,history_revision:int>=1,draft_id:string,weather?:Weather|null} | 200 Diary
+GET | /api/diaries?month=YYYY-MM | query month 필수 | 200 Month
+GET | /api/diaries/{diary_id} | 없음 | 200 Diary
+POST | /api/diaries/{diary_id}/drawing | multipart file 필수 | 200 {diary_id:UUID,asset:Drawing}
+PUT | /api/diaries/{diary_id}/edits | multipart, 아래4절 | 200 EditResult
+DELETE | /api/diaries/{diary_id} | Idempotency-Key, If-Match 필수 | 204
+GET | /api/me/room | 없음 | 200 RoomResult
+POST | /api/me/rewards/sync | {} | 200 {new_rewards:Reward[],wallet:Wallet}
+GET | /api/shop/items | 없음 | 200 {items:ShopItem[]}
+POST | /api/shop/purchases | {client_request_id:request_key,item_id:request_key} | 200 {item_id:string,owned:true,wallet:Wallet}
+POST | /api/shop/refunds | {client_request_id:request_key,item_id:request_key} | 200 {item_id:string,refunded_coins:int,owned:false,wallet:Wallet}
+PUT | /api/me/room/placements/{item_id} | {x:int,y:int} | 200 {item_id:string,position:{x:int,y:int}}
+DELETE | /api/me/room/placements/{item_id} | 없음 | 204
+PUT | /api/me/room/theme | {item_id:request_key|null} | 200 {theme:Theme,tree:Tree}
+POST | /api/me/tree/water | {client_request_id:request_key} | 200 {watered_on:date,wallet:Wallet,tree:Tree}
+POST | /api/chat-sessions/{session_id}/comic-previews | {client_request_id:request_key,history_revision:int>=0,draft_id:string(1~128)} | 정상 입력도503, 생성 미활성
+GET | /api/chat-sessions/{session_id}/comic-previews/{preview_id} | 없음 | 200 Comic
+POST | /api/diaries/{diary_id}/comics | {client_request_id:request_key,preview_id:UUID} | 200 Comic
+GET | /api/diaries/{diary_id}/comics | 없음 | 200 DiaryComic
+
+만화 생성 경로의 성공 DTO가 OpenAPI에 있더라도 현재는 정상 초안 검사 뒤503이다.
+상점/방 경로에는 DELETE 일기와 달리 If-Match를 요구하지 않는다.
+
+3. 대화·초안·확정·그림 JSON 구조
+
+다음은 JSON 필드:자료형 표기다. 생략 부호 없이 실제 응답 필드를 적었다.
+Weather = sunny | cloudy | snowy | rainy.
+Session = {session_id:string,history_revision:int,reply:Reply,finished:bool,mock:bool,fallback:bool}
+Reply = {message_id:string,role:"assistant",text:string}
+Message = Session의 모든 필드 + {client_message_id:string}
+DraftResult = {session_id:string,client_request_id:string,history_revision:int,draft:Draft}
+Draft = {draft_id:string,status:"draft",text:string,pages:Page[],sources:Source[],
+         fallback:bool,requires_confirmation:true,mock:bool}
+Page = {text:string,source_ids:int[],imageUrl:null}
+Source = {id:int,text:string}
+Source.id는 전체 대화의 0-based index이며 message_id가 아니다.
+일기 초안 pages는1~6개, 초안 text는최대20000자, 원본 대화는최대60메시지/총20000자다.
+초안의 requires_confirmation=true는 사용자 확인이 필요하다는 뜻이며 이미 확인했다는 증거가 아니다.
+확정 POST에는 text/pages/messages를 보내지 않는다. 서버가 저장한 초안을 사용한다.
+확정만으로 그림·만화가 생성/업로드되지는 않는다. 현재 원본 그림은 별도 drawing POST다.
+
+Diary = {diary_id:UUID,diary_date:date,weather:Weather|null,confirmed_text:string,
+         confirmed_at:timestamp,edit_version:int>=1,updated_at:timestamp,ai_draft:Draft,
+         messages:SavedMessage[],imageUrl:string|null,assets:Drawing[]}
+SavedMessage = {position:int,role:"child"|"assistant",text:string}
+Month = {month:string,diaries:Summary[]}
+Summary = {diary_id:UUID,diary_date:date,weather:Weather|null,preview:string}
+preview는 현재 confirmed_text의 앞120자. 삭제 일기는 목록/상세에서 제외된다.
+빈 달력은 {"month":"2026-11","diaries":[]}다.
+
+Drawing = {asset_id:UUID,asset_kind:"original_drawing",mime_type:"image/png"|"image/jpeg",
+           byte_size:int,width:int,height:int,sha256:string(hex64),imageUrl:string,expires_at:timestamp}
+원본/활성 그림이 없거나 아직 pending이면 Diary.imageUrl=null, assets=[]. 만화는 여기 넣지 않는다.
+서명URL은300초, 만료 시 상세 GET으로 재발급한다. URL을 영구 경로나 동일성 비교키로 저장하지 않는다.
+그림 입력은 실제 PNG/JPEG,10MiB 이하/각 변8192 이하/1600만 픽셀 이하/단일 프레임.
+BE가 실제 디코딩·정규화한다. 파일명/MIME 선언만으로 성공을 판정하지 않는다.
+최초 drawing POST는 같은 바이트 재전송 가능. 다른 그림이면409 DRAWING_ALREADY_EXISTS.
+버전2 이상에서는 최초 drawing 대신 edits를 써야 한다.
+
+4. 수정·삭제·환불의 재시도
+
+PUT edits FormData 필수:
+  client_request_id:string(request_key), expected_version:문자열로 직렬화한 정수1~2147483646,
+  confirmed_text:string(전체 본문1~20000자, 공백뿐이거나 NUL 포함 불가).
+선택 file: 새 PNG/JPEG. 생략하면 현재 활성 그림 유지. 그림만 바꿔도 전체 본문을 보낸다.
+중복/알 수 없는 form 필드, JSON body, 문자열 file, 빈 본문은 거절한다.
+EditResult = {diary_id:UUID,edit_version:int>=2,confirmed_text:string,updated_at:timestamp,
+              original_drawing:Drawing|null}
+수정은 confirmed_text와 활성그림·버전만 바꾼다. ai_draft/messages/confirmed_at은 원본이다.
+
+DELETE 예: Idempotency-Key:delete_001, If-Match:"2" (실제 헤더 값에 큰따옴표 포함).
+ETag 응답을 기대하지 말고 최신 Diary.edit_version을 따옴표로 감싼다.
+W/"2", 따옴표 없는2, 헤더 누락, 잘못된 버전은422 DIARY_EDIT_INVALID.
+FE 삭제 확인창의 '예' 이후만 호출한다. '아니오'는 서버 요청 없음. 확인창 구현은 FE 후속이다.
+같은 키·일기·버전 재요청은204. 다른 키로 이미 삭제된 일기는404.
+같은 키에 다른 일기/버전은409 IDEMPOTENCY_CONFLICT.
+논리삭제이므로 원본/그림/보상/만화/영수증은 남는다. 개인정보 영구삭제 기능으로 설명하지 않는다.
+
+수정/구매/환불/물주기의 결과가 불명확하면 같은 키·동일 입력을 보존한다.
+수정 파일은 원래 바이트를 유지해야 한다. 파일/본문/버전 중 하나를 바꾸고 같은 키를 쓰지 않는다.
+409 버전 충돌은 상세 재조회→사용자 재확인→새 키/새 버전으로 저장한다.
+새로운 작업에는 새 키, 같은 작업 복구에는 원래 키를 사용한다.
+환불은 당시 price_paid 전액만 코인으로 반환하고 배치·보유를 해제한다. FE 금액 필드 없음.
+같은 환불 키는 당시 wallet snapshot을 재생하므로, 재구매 이후 재전송 응답은 현재 잔액이 아니다.
+환불 후에는 room/shop을 다시 조회한다. 재구매/재환불은 각각 새 키다.
+환불된 과거 구매키는409 PURCHASE_ALREADY_REFUNDED, 테마 환불은422 ITEM_NOT_REFUNDABLE.
+
+5. 지갑·상점·방·나무 JSON 구조
+
+Wallet = {coins:int>=0,water_drops:int>=0}
+Theme = {item_id:string|null,background_asset_key:string,diary_cover_asset_key:string}
+Tree = {stage:int(0~7),max_stage:7,days_watered:int(0~7),watered_today:bool,asset_key:string}
+RoomResult = {as_of_date:date,wallet:Wallet,room:{width:1440,height:900,theme:Theme},
+              tree:Tree,inventory:InventoryItem[]}
+InventoryItem = {item_id:string,name:string,category:"furniture"|"decoration"|"theme",
+                 asset_key:string|null,width:int|null,height:int|null,position:{x:int,y:int}|null,
+                 refundable:bool,refund_coins:int|null}
+ShopItem = {item_id:string,name:string,category:"furniture"|"decoration"|"theme",price_coins:int>=0,
+            asset_key:string|null,width:int|null,height:int|null,background_asset_key:string|null,
+            diary_cover_asset_key:string|null,adult_tree_asset_key:string|null,owned:bool}
+Reward = {diary_date:date,coins:30,water_drops:1}
+카탈로그는 활성 상품만, inventory는 보유 상품이다. 초기 운영 상품/이미지 등록은 아직 하지 않았다.
+furniture/decoration은 asset_key·크기가 있고 테마 전용3키가null.
+theme은 asset_key·크기가null이고 배경/표지/성체3키가 있다. 테마는 position=null, refundable=false,
+refund_coins=null이다. 가구·장식은 refundable=true, refund_coins=구매 당시 가격이다.
+
+기본 방은 room_default/cover_default, 초기지갑0/0·tree.stage=0·inventory=[].
+좌상단 정수 px 좌표: 0<=x<=1440-width, 0<=y<=900-height. 회전/축척 필드 없음, 겹침 허용.
+FE 화면이 축소되면 표시 배율을 역산해 정수 원본 좌표를 보낸다. 소수/문자열/bool/null 금지.
+배치 DELETE는 보유권을 유지하며 위치만 해제한다. 환불과 다르다.
+테마 구매 후 별도 PUT theme. {"item_id":null}은 기본 복귀. 성장/잔액/좌표/기존일기는 보존된다.
+stage0~6은 tree_stage_0~tree_stage_6, stage7 성체는 현재 테마 adult_tree_asset_key 또는
+tree_adult_default. FE는 tree.asset_key를 사용하며 테마를 샀다고 stage0 나무를 성체로 바꾸지 않는다.
+물주기는 서울 날짜별1회/물방울1개/누적성장+1, 연속 출석 필요 없음. stage7부터 새 물주기 불가.
+같은 물주기 키를 다음 날 재전송하면 watered_on은 과거 처리일, wallet/tree는 현재 상태다.
+
+보상은 날짜별 최초 확정30/1, 삭제/재작성으로 추가 지급하지 않는다. 설치 전 일기 날짜는 소급 보류다.
+일기 저장 뒤 BE가 자동 sync를 시도한다. 실패해도 확정 저장은 유지되며 후속 {} sync로 복구한다.
+따라서 FE sync의 new_rewards=[]는 실패가 아니다. wallet을 사용하고 로컬에서 무조건30을 더하지 않는다.
+실제 저장 완료 뒤 보상 안내 UX와 알림 중복 방지는 FE 연결 검증 대상이다.
+
+6. 만화 응답 — 구현은 있으나 FE·AI 확인 필요
+
+Comic = {preview_id:UUID|null,status:"none"|"queued"|"running"|"ready"|"partial"|"failed",
+         panels:Panel[],recovery_required:bool,
+         error_code:null|"COMIC_RESULT_UNKNOWN"|"COMIC_STORAGE_RECOVERY_REQUIRED"}
+Panel = {position:int,caption:string,status:"pending"|"ready"|"failed"|"unknown"|"rejected"|"mock",
+         imageUrl:string|null,expires_at:timestamp|null}
+DiaryComic = Comic의 모든 필드 + {current_edit_version:int>=1,source_edit_version:int>=1|null,
+                               content_status:"none"|"current"|"stale"}
+none은 preview_id=null/panels=[], 나머지 저장결과는 순서1~4의 네 컷이다.
+ready4개면ready, 일부ready면partial, ready0개면failed. queued/running은 현재 반환하지 않는다.
+pending은 업로드 복구 필요이지 생성 진행 중이 아니다. unknown은 확정 실패와 구분한다.
+status=ready와 content_status=stale은 함께 나올 수 있다. 과거 버전의 이미지가 준비된 뜻이다.
+편집 뒤 자동 재생성 없음. 원본 preview를 버전2 일기에 새로 붙이는 요청은409다.
+삭제 일기 GET comics는404, 별도 세션 preview와 기존 서명URL은 즉시 철회되지 않는다.
+현재 POST 생성503은 자동 재시도하지 않는다. 일기 확정/그림 저장 성공과 분리해 안내한다.
+실제 생성 worker·원문/장면 확인 증거·부분성공/unknown UX는 COMIC_PREVIEWS_V1.txt 참조.
+
+7. 공통 오류와 FE 처리 기준
+
+오류 JSON = {"error":{"code":"CODE","message":"사용자 안내","retryable":false},"request_id":"req_..."}
+코드로 분기하고 message 문자열 일치에 의존하지 않는다. HTTP 오류도 동일 외피다.
+
+HTTP | code | 처리
+401 | AUTHENTICATION_FAILED | 기존 Auth 세션 갱신/재로그인, 상대 회원 데이터로 대체하지 않음
+403 | ACCESS_DENIED | 익명/역할 권한 안내, 자동 요청 반복 금지
+503 | AUTH_NOT_CONFIGURED, AUTH_UNAVAILABLE | 서버 설정/일시 장애, retryable 확인
+502 | AUTH_INVALID_RESPONSE | 인증 서버 응답 이상, 성공 처리 금지
+404 | SESSION_NOT_FOUND, DIARY_DRAFT_NOT_FOUND | memory 재시작/대상 소실 고려, 저장 여부 먼저 조회
+404 | DIARY_NOT_FOUND, COMIC_PREVIEW_NOT_FOUND | 없음·타 회원·삭제 모두 정상 비노출 처리
+409 | IDEMPOTENCY_CONFLICT | 같은 키의 입력 변경 중단, 원래 요청 확인
+409 | REQUEST_IN_PROGRESS, SESSION_BUSY | 기존 요청 결과 기다리기, 새 키로 중복 실행 금지
+409 | HISTORY_REVISION_CONFLICT | 최신 대화/초안 기준 재확인
+409 | DIARY_DATE_CONFLICT | 해당 서울 날짜 달력 확인, 기존 일기 덮어쓰지 않음
+409 | DIARY_EDIT_VERSION_CONFLICT | 상세 재조회·사용자 재확인 후 새 수정 요청
+409 | DRAWING_ALREADY_EXISTS | 기존 그림 재조회, 변경 의도면 edits 사용
+409 | INSUFFICIENT_COINS, INSUFFICIENT_WATER | room 재조회 및 자원 부족 안내
+409 | ITEM_ALREADY_OWNED, ITEM_NOT_OWNED | shop/room 재조회
+409 | PURCHASE_ALREADY_REFUNDED | 과거 구매 복구키 재사용 중단, 새 구매는 새 키
+409 | TREE_ALREADY_WATERED_TODAY, TREE_FULL_GROWN | tree 재조회, 오늘/성체 동작 제한
+409 | COMIC_PREVIEW_MISMATCH, COMIC_NOT_READY, COMIC_ALREADY_ATTACHED | 원문/버전/연결 상태 확인, 새 생성 자동 호출 금지
+422 | VALIDATION_ERROR, DIARY_EDIT_INVALID, ROOM_POSITION_INVALID | 요청 필드·폼·버전·좌표 수정
+422 | ITEM_NOT_PLACEABLE, ITEM_NOT_REFUNDABLE | 테마/상품 종류에 맞는 UI 제한
+422 | NO_CHILD_MESSAGES, CONVERSATION_LIMIT_REACHED | 대화/길이 안내, 원문 임의 삭제 금지
+422 | COMIC_TEXT_LIMIT, COMIC_SOURCE_LIMIT | 만화 생략 안내, 기존 일기 저장 허용
+404 | ITEM_NOT_FOUND | 상품 재조회/비활성 상품 안내
+413/422 | DRAWING_TOO_LARGE, DRAWING_DIMENSIONS_EXCEEDED / DRAWING_INVALID_IMAGE | 입력 그림 검증 안내
+503 | ROOM_STORAGE_UNAVAILABLE, DIARY_EDIT_STORAGE_UNAVAILABLE, DIARY_STORAGE_UNAVAILABLE | 결과 불명 가능, 동일 요청으로 복구
+503 | DIARY_STORAGE_NOT_CONFIGURED, DIARY_STORAGE_FAILED | 스키마/설정 확인, 빈 결과로 숨기지 않음
+502 | DIARY_STORAGE_INVALID_RESPONSE, COMIC_STORAGE_INVALID_RESPONSE | 잘못된 응답, 성공 처리 금지
+503 | COMIC_PREVIEW_NOT_ENABLED | 현재 생성 미제공, retryable=false
+502/504 | AI_OUTCOME_UNKNOWN | 모델 호출 결과 불명, 자동 재생성 금지
+503 | AI_CONNECTION_FAILED | 전송 전 실패의 retryable 확인 후 같은 키 사용
+502/503 | AI_BAD_RESPONSE, AI_REQUEST_REJECTED / AI_UNAVAILABLE | 계약/모델 장애, 오류값에 따라 안내
+
+이미지 저장/조회에는 DRAWING_STORAGE_UNAVAILABLE, DRAWING_READ_UNAVAILABLE(503,
+retryable=true)도 사용된다. app/clients/drawings.py가 최종 구현 기준이다.
+retryable=true도 무조건 새 키로 호출해도 된다는 뜻이 아니다. 결과 불명과 멱등성을 함께 고려한다.
+
+8. 연결 시 확인할 항목
+
+DB 후보/전용 계정 사용 승인 후 실행할 전체 체크리스트는 DB_INTEGRATION_PREP_20261110.txt 7절.
+이메일 신규가입·메일 수신·리다이렉트·만료/재사용 링크·재발송 UI는 아직 실검증하지 않았다.
+실제 상품/에셋 목록과 URL 매핑, 저장 보상 안내, 편집 충돌/삭제 확인창, stale/partial/unknown UX는
+FE 담당자 확인 필요다. 서버 응답 구조를 바꾸는 합의는 이 문서만으로 확정하지 않는다.
+생성 만화는 AI 담당자의 입력/장면 확인 및 지속성 실행 방식 확인 후에만 실통합 대상에 넣는다.
