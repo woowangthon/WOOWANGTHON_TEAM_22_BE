@@ -20,7 +20,16 @@ select name, to_regclass('public.' || name) as existing_object
 from unnest(array['chat_sessions','chat_requests','member_reward_legacy_diaries',
     'member_reward_wallets','member_daily_reward_grants','shop_items','member_owned_items',
     'member_room_placements','member_room_settings','member_tree_states','member_tree_watering_events',
-    'comic_previews','diary_comics','comic_attach_requests']) name;
+    'comic_previews','diary_comics','comic_attach_requests',
+    'diary_edit_requests','diary_delete_requests','shop_purchase_receipts','shop_refund_receipts']) name;
+-- v0.4 열/인덱스만 부분 생성된 상태도 중단한다. diaries_user_date_uq는 최초에는 UNIQUE constraint다.
+select table_name, column_name from information_schema.columns
+where table_schema='public' and (
+    (table_name='diaries' and column_name in ('edit_version','updated_at','deleted_at','active_drawing_edit_id'))
+    or (table_name='member_owned_items' and column_name='purchase_id')
+    or (table_name='diary_comics' and column_name='source_edit_version'));
+select tablename,indexname,indexdef from pg_indexes where schemaname='public'
+and (tablename in ('diaries','member_daily_reward_grants') or indexname like '%v04%');
 select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
        p.prosecdef, p.proconfig, p.proacl
 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -28,7 +37,7 @@ where n.nspname = 'public' and p.proname in (
     'confirm_member_diary','reserve_diary_drawing','complete_diary_drawing',
     'member_room_command','room_snapshot','room_guard_owned_catalog','room_guard_item_usage',
     'comic_panels_valid','save_comic_preview_result','complete_comic_preview_asset','attach_diary_comic',
-    'reserve_chat_request','transition_chat_request','confirm_chat_session_diary')
+    'reserve_chat_request','transition_chat_request','confirm_chat_session_diary','member_diary_edit')
 order by p.proname;
 select n.nspname, p.proname, pg_get_functiondef(p.oid)
 from pg_proc p join pg_namespace n on n.oid = p.pronamespace

@@ -34,11 +34,19 @@ where coalesce(w.coins, 0) <> coalesce(e.coins, 0) - coalesce(s.coins, 0)
    or coalesce(w.water_drops, 0) <> coalesce(e.water, 0) - coalesce(t.water, 0)
    or coalesce(g.growth_points, 0) <> coalesce(t.growth, 0);
 
--- 신규일기 중 미지급 항목은 복구 대기다. 과거 보류 목록은 제거하지 않는다.
-select count(*) as pending_new_confirmations from public.diaries d
-where d.confirmation_fingerprint is not null
-and not exists (select 1 from public.member_reward_legacy_diaries h where h.diary_id = d.id)
-and not exists (select 1 from public.member_daily_reward_grants g where g.diary_id = d.id and g.member_id = d.user_id);
+-- v0.4 날짜별 자격과 일치시킨다. 삭제/재작성 ID를 미지급으로 중복 계산하지 않는다.
+-- 삭제된 최초 확정의 지연 지급은 포함하고, fingerprint 없는 과거 보류 날짜도 제외한다.
+with first_confirmed as (
+    select distinct on (user_id,diary_date) id,user_id,diary_date
+    from public.diaries where confirmation_fingerprint is not null
+    order by user_id,diary_date,confirmed_at,id
+)
+select count(*) as pending_new_confirmations from first_confirmed d
+where not exists (select 1 from public.member_reward_legacy_diaries h
+    join public.diaries original on original.id=h.diary_id and original.user_id=h.member_id
+    where h.member_id=d.user_id and original.diary_date=d.diary_date)
+and not exists (select 1 from public.member_daily_reward_grants g
+    where g.member_id=d.user_id and g.diary_date=d.diary_date);
 
 select c.relname, c.relrowsecurity, c.relacl from pg_class c join pg_namespace n on n.oid = c.relnamespace
 where n.nspname = 'public' and c.relname in (
