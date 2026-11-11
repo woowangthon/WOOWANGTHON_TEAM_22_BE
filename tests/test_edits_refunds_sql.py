@@ -25,6 +25,17 @@ def test_date_grant_uniqueness_and_first_confirmed_includes_deleted_entitlement(
     assert 'deleted_at is null' not in grant
 
 
+def test_legacy_date_hold_includes_rows_without_fingerprint_and_is_owner_scoped():
+    grant = CODE.split("if p_action = 'sync_rewards' then")[1].split("elsif p_action = 'purchase'")[0]
+    hold = grant.split('from public.member_reward_legacy_diaries held')[1].split('on conflict')[0]
+    assert 'original.id = held.diary_id' in hold
+    assert 'original.user_id = held.member_id' in hold
+    assert 'held.member_id = p_member_id' in hold
+    assert 'original.diary_date = d.diary_date' in hold
+    assert 'confirmation_fingerprint' not in hold
+    assert 'deleted_at' not in hold
+
+
 def test_atomic_finalization_receipt_and_active_revision_and_server_only_access():
     assert 'unique(user_id, client_request_id)' in CODE
     assert 'references public.diary_edit_requests(request_id, diary_id, user_id)' in CODE

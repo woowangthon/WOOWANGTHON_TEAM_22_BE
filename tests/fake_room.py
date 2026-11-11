@@ -124,6 +124,8 @@ class FakeRoomDatabase:
         if action == "sync_rewards":
             rewards = []
             owner = next(k for k, value in self.members.items() if value is state)
+            held_dates = {diary["date"] for diary in self.diaries
+                          if diary["member"] == owner and diary["id"] in self.legacy_diary_ids}
             first_dates = set()
             for diary in sorted(self.diaries, key=lambda value: value["date"]):
                 if diary["member"] != owner or not diary.get("confirmed", True):
@@ -132,7 +134,8 @@ class FakeRoomDatabase:
                     continue
                 first_dates.add(diary["date"])
                 if (diary["member"] == owner and diary.get("confirmed", True)
-                        and diary["id"] not in self.legacy_diary_ids and diary["date"] not in state.grants.values()):
+                        and diary["id"] not in self.legacy_diary_ids
+                        and diary["date"] not in held_dates and diary["date"] not in state.grants.values()):
                     state.grants[diary["id"]] = diary["date"]
                     state.coins += 30
                     state.water += 1

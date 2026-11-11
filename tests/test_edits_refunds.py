@@ -343,6 +343,27 @@ async def test_deferred_first_reward_survives_delete_and_legacy_day_cannot_be_by
         assert wallet == {"coins": 0 if legacy else 30, "water_drops": 0 if legacy else 1}
 
 
+async def test_legacy_day_without_fingerprint_stays_held_after_delete_and_recreate():
+    async with api() as (client, db, storage):
+        db.room.fail_during = "sync_rewards"
+        did = (await saved_diary(client))["diary_id"]
+        db.diaries[did]["confirmation_fingerprint"] = None
+        db.room.legacy_diary_ids.add(did)
+        assert (await client.delete(f"/api/diaries/{did}", headers=delete_headers())).status_code == 204
+        db.room.fail_during = None
+        path, body, _ = await prepare(client, key="legacy_recreate")
+        body["client_request_id"] = "legacy_recreate"
+        recreated = await client.post(path, json=body)
+        assert recreated.status_code == 200
+        assert recreated.json()["diary_id"] != did
+        for _ in range(2):
+            result = await client.post("/api/me/rewards/sync", json={})
+            assert result.status_code == 200
+            assert result.json() == {"new_rewards": [], "wallet": {"coins": 0, "water_drops": 0}}
+        assert db.diaries[did]["confirmation_fingerprint"] is None
+        assert not db.room.member(MEMBER_A).grants
+
+
 async def test_purchase_and_refund_in_flight_use_one_serial_order():
     db = EditDatabase()
     db.room.items["chair"] = item()

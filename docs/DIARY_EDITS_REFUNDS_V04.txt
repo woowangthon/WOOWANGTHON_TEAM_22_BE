@@ -4,6 +4,17 @@
 운영 DB/Storage/회원 A·B·C·D/FE·AI/배포 변경 없음. 아래 SQL은 실행하지 않았다.
 기존 v0.3.1 및 DB_INTEGRATION_PREP_20261110.txt의 일기ID별 지급 설명보다 이 문서의 날짜별 정책이 우선한다.
 
+2026-11-11 사전 점검 보완:
+  - fingerprint가 없는 과거 일기를 삭제하고 같은 날짜에 재작성하면 소급 보류를 우회하는
+    SQL 후보 결함을 수정했다. 보류 ID에 연결된 회원·날짜 전체를 검사하며 기존 행은 바꾸지 않는다.
+  - EditDatabase Fake가 fingerprint 자격을 누락했던 부분도 실제 SQL 조건에 맞췄다.
+    새 HTTP 회귀는 수정 전 30/1 잘못 지급으로 실패했고 수정 후 통과했다.
+    새 SQL 정적 검사는 회원별 날짜 연결 및 fingerprint/삭제 여부와 무관한 보류를 검사한다.
+  - 전체963개 통과(기준961+신규2,41.41초), 실패/오류/skip0, 통신/.env 차단시도0.
+    SQL 실행·실제 PostgreSQL 검증은 아니다. 날짜별 정책·소급 보류·환불/삭제 계약 변경 없음.
+  - 최신 DB/Render/실통합 준비: DB_INTEGRATION_PREP_20261110.txt.
+    FE 통합 참조: FE_API_CONTRACT_PHASE2.txt. 아래 기존 구현 기록은 보존한다.
+
 1. 구현 API와 실제 요청·응답
 
 모두 기존 Supabase Bearer 인증/오류 envelope/no-store를 사용한다.

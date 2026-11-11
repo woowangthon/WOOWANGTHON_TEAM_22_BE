@@ -561,6 +561,11 @@ begin
             ) d where true
                 and not exists (select 1 from public.member_reward_legacy_diaries old
                     where old.diary_id = d.id)
+                -- fingerprint가 없는 과거 일기도 그 회원의 날짜 전체를 소급 보류한다.
+                and not exists (select 1 from public.member_reward_legacy_diaries held
+                    join public.diaries original on original.id = held.diary_id
+                        and original.user_id = held.member_id
+                    where held.member_id = p_member_id and original.diary_date = d.diary_date)
             on conflict (member_id, diary_date) do nothing
             returning diary_date, coins, water_drops
         ) select count(*)::integer, coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(

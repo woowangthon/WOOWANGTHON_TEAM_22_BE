@@ -27,7 +27,9 @@ class EditDatabase(DrawingDatabase):
         path = request.url.path
         if path == "/rest/v1/rpc/member_room_command":
             self.room.diaries = [{"id": row["id"], "member": row["user_id"],
-                                 "date": row["diary_date"]} for row in self.diaries.values()]
+                                 "date": row["diary_date"],
+                                 "confirmed": row["confirmation_fingerprint"] is not None}
+                                for row in self.diaries.values()]
             return await self.room(request)
         if path == "/rest/v1/diary_edit_requests":
             owner = {"Bearer fake-member-a": str(MEMBER_A),
