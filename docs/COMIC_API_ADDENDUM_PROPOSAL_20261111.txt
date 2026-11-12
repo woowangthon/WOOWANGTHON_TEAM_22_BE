@@ -1,0 +1,186 @@
+2026-11-12 ?? ??: BE_MAIN_REVIEW_20261112.txt ??.
+??? ?? ?? ????? ????. room/comic/v0.4/jobs ?? ?? ? Render c75a9bc ?? ???
+?? ??? ???? ??? ????? ???. ?? ??? SQL? ????? ???.
+runtime factory? ??? worker ???? OpenAPI 202 ??? ????. ?? app? worker ?????.
+FE main? ?? API ??? ????? API? proposal ??? ????. 005? ??? ???.
+
+오늘,그리고 — 공통 API 계약 추가안 (FE 합의 전)
+2026-11-11 Asia/Seoul. 현재 BE 로컬 구현을 대조한 제안이며 팀 확정/배포 완료가 아니다.
+기준: app/api/comics.py, comic_schemas.py, comic_job_schemas.py,
+services/comics.py·comic_jobs.py, clients/comic_ai.py·comic_jobs.py.
+FE·AI 원본 수정/메시지 전송 없음. 기존 일기/그림/확정 저장 계약은 유지한다.
+
+1. 기존 계약과 추가안의 구분
+
+추가할 경로 두 개:
+- POST /api/chat-sessions/{session_id}/comic-plans: 서버 초안에 대한 장면 글 계획.
+- GET /api/chat-sessions/{session_id}/comic-requests/{client_request_id}: 원래 키로 생성 작업 조회.
+
+기존 경로에 추가할 비동기 응답 계약:
+- POST /api/chat-sessions/{session_id}/comic-previews: 영속 접수 성공 시202,
+  같은 요청의 완료/unknown 결과 재사용 시200. 기존 ComicResponse와 작업 응답 union.
+- GET /api/chat-sessions/{session_id}/comic-previews/{preview_id}: 저장 결과 조회(기존).
+- POST /api/diaries/{diary_id}/comics: 확정 일기에 preview 연결(기존).
+- GET /api/diaries/{diary_id}/comics: 저장 만화와 current/stale 판정(기존).
+
+현재 기본 app=create_app()는 enable_comic_worker=False다.
+생성 POST는 서버 초안 검증 후503 COMIC_PREVIEW_NOT_ENABLED(retryable=false)를 유지한다.
+SQL 적용만으로202가 활성화되지 않는다. plan API의200은 이미지 생성/일기 확정 성공이 아니다.
+현재 OpenAPI에는 POST의 런타임202가 명시되지 않았으므로 생성 SDK가200만 가정하면 안 된다.
+이번에는 계약 문서만 정리하며 라우터/스키마/기능 활성화를 수정하지 않는다.
+
+2. 공통 요청·오류
+
+모든 경로: Authorization: Bearer <비익명 회원 access token>.
+POST는 Content-Type: application/json. 추가 필드는422로 거절한다.
+history_revision은 JSON 정수>=0, draft_id는 길이1~128 문자열이라는 DTO 규칙을 가진다.
+실제 요청에는 서버가 발급한 현재 revision과 draft_<32자리 소문자 hex>를 그대로 사용한다.
+session_id도 서버가 발급한 ses_<32자리 소문자 hex>를 그대로 사용한다.
+client_request_id는 [A-Za-z0-9_-], 길이1~128 문자열. 이미지 생성 요청의 원래 키다.
+HTTP X-Request-ID / 오류 본문의 request_id는 진단 ID이며 client_request_id와 다르다.
+
+공통 오류 외피:
+{"error":{"code":"COMIC_JOBS_UNAVAILABLE","message":"만화 작업 상태 확인 필요",
+          "retryable":false},"request_id":"req_<진단ID>"}
+
+공통 상태/코드:
+401 AUTHENTICATION_FAILED; 403 ACCESS_DENIED(익명/비회원);
+422 VALIDATION_ERROR(요청 형식/범위/추가 필드);
+503 AUTH_NOT_CONFIGURED 또는 AUTH_UNAVAILABLE; 502 AUTH_INVALID_RESPONSE.
+인증 서버 일시 장애의 AUTH_UNAVAILABLE은 retryable=true다.
+message는 표시용이며 분기는 code/status로 한다. Cache-Control: no-store.
+
+3. 신규 POST comic-plans
+
+요청:
+{"history_revision":1,"draft_id":"draft_<서버 발급 ID>","input_confirmed":true}
+client_request_id, 임의 diary_text/user_id는 받지 않는다.
+input_confirmed 기본값은false이므로 생략/false면409 COMIC_CONFIRMATION_REQUIRED.
+원문 확인을 마친 기존 UI 동작에서 요청한다. 화면 진입만으로true를 만들지 않는다.
+서버는 세션 소유권·현재 revision·초안을 검증하고 AI /api/visual-story를 호출한다.
+일기를 확정하거나 이미지를 만들거나 comic_generation_jobs를 접수하지 않는다.
+
+200 응답: 아래 필드를 가진 VisualPlan 전체 객체(추가 data 래퍼 없음).
+- diary_text: 확인 원문(string, 1~6000자)
+- diary_hash: 원문 SHA256, 소문자 hex64
+- sources: [{id: 0~79 정수, text: string}], 1~80개, 원문 조각 순서
+- storybook: null
+- comic4:
+    format: "comic4", layout: "grid_2x2"
+    planning_mode: "model" | "deterministic" | "fallback" | "mock"
+    scenes: 정확히4개, order=1,2,3,4 순서
+      {scene_id: string, order: integer, caption: string,
+       source_ids: integer[], imageUrl: null, repeated: boolean,
+       reuse_scene_id: string|null}
+    notices: string[] (최대20개)
+- requires_confirmation: true
+- mock: boolean
+이 모델은 이미지가 없는 계획이다. repeated=true는 앞선 원본 컷의 재사용을 뜻한다.
+sources/캡션/장면 순서/전체 원문 포함 여부를 BE가 검사한다.
+FE는 객체 전체를 보관하고, 화면에서 장면 글을 확인한 뒤 같은 객체를 다음 요청에 전달한다.
+다른 초안으로 바뀌면 이전 plan/확인 상태를 재사용하지 않는다.
+
+추가 오류:
+404 SESSION_NOT_FOUND(타회원 포함), DIARY_DRAFT_NOT_FOUND
+409 SESSION_BUSY(retryable=true), HISTORY_REVISION_CONFLICT,
+    COMIC_CONFIRMATION_REQUIRED
+422 COMIC_TEXT_LIMIT(원문 공백/6000자 초과), COMIC_SOURCE_LIMIT(80조각 초과)
+502 COMIC_AI_BAD_RESPONSE, COMIC_AI_REJECTED, COMIC_RESULT_UNKNOWN(AI 5xx)
+503 COMIC_AI_CONNECTION_FAILED; 504 COMIC_RESULT_UNKNOWN(전송 이후 timeout 등)
+이번 범위의 SESSION_STORE_MODE=memory에서는 서버 재시작 후 plan용 세션/초안이 사라질 수 있다.
+005의 세션 영속화와 신규 생성 작업 GET의 영속 복구를 혼동하지 않는다.
+
+4. 기존 POST comic-previews의 비동기 추가안
+
+요청:
+{"client_request_id":"comic_original_key","history_revision":1,
+ "draft_id":"draft_<서버 발급 ID>","input_confirmed":true,"scene_confirmed":true,
+ "confirmed_plan": <3번에서 반환받고 장면 글을 확인한 VisualPlan 전체>}
+
+기존 장면 확인 완료 동작에 자동으로 연결한다. 별도 '생성' 버튼은 필요 없다.
+원문 확인과 장면 글 확인 증거는 여전히 필요하다. 두 확인을 화면 진입으로 대체하지 않는다.
+보낼 키/session/draft/revision/plan을 먼저 고정하고 해당 시도는 POST 한 번만 시작한다.
+다중 클릭/리렌더링/탭 재진입이 새 키나 POST를 만들지 않도록 한다.
+
+202: DB admit 완료 + 준비된 실행기, job_state=queued|running.
+200: 같은 요청의 job_state=completed|unknown 재사용.200도 이미지 성공을 뜻하지 않는다.
+POST의 패널 imageUrl/expires_at은null이다. 후속 GET으로 서명 URL을 받는다.
+같은 키·같은 본문은 같은 작업, 같은 키·다른 본문은409 IDEMPOTENCY_CONFLICT.
+같은 초안/session/revision을 새 키로 우회하면409 COMIC_DRAFT_ALREADY_REQUESTED.
+확인 누락은409 COMIC_CONFIRMATION_REQUIRED, 계획 불일치는409 COMIC_PLAN_MISMATCH.
+초안/인증/형식 오류는2·3번을 따른다.
+503 COMIC_PREVIEW_NOT_ENABLED: 실행기 미준비/기본 비활성.
+503 COMIC_JOBS_UNAVAILABLE: DB 설정/스키마/권한/접수 응답 유실/담당자 중단.
+502 COMIC_JOB_INVALID_RESPONSE: 원장 형식/소유권/접수 응답 불일치.
+COMIC_JOBS_UNAVAILABLE 또는 통신 오류는 미접수를 증명하지 않는다. 자동 POST 재시도 금지.
+
+5. 신규 GET comic-requests/{client_request_id}
+
+본문/추가 쿼리 없음. Bearer와 원래 session_id/client_request_id만 필요하다.
+preview_id·fingerprint·plan·session 메모리가 없어도 DB 기록을 읽을 수 있다.
+타회원/다른 session/미발견을 구분하지 않고200 receipt_found=false로 반환한다.
+인증401/403 또는 DB 오류를 이 미발견 응답으로 바꾸지는 않는다.
+
+200 응답 필드(ComicJobResponse, 추가 data 래퍼 없음):
+- client_request_id: 원래 키
+- job_state: "queued" | "running" | "completed" | "unknown"
+- receipt_found: boolean
+- worker_available: 이 응답을 처리한 BE 프로세스의 실행 task 준비 여부(boolean)
+- retry_generation_allowed: 항상false
+- preview_id: UUID|null
+- status: "none" | "queued" | "running" | "ready" | "partial" | "failed"
+- panels: [{position: integer, caption: string,
+            status: "pending"|"ready"|"failed"|"rejected"|"mock"|"unknown",
+            imageUrl: string|null, expires_at: ISO8601 시각|null}]
+- recovery_required: boolean
+- error_code: null | "COMIC_RESULT_UNKNOWN" | "COMIC_STORAGE_RECOVERY_REQUIRED"
+
+미발견 예시:
+{"client_request_id":"comic_original_key","job_state":"unknown","receipt_found":false,
+ "worker_available":false,"retry_generation_allowed":false,"preview_id":null,
+ "status":"none","panels":[],"recovery_required":false,"error_code":"COMIC_RESULT_UNKNOWN"}
+worker_available은 실행기 상태에 따라true일 수도 있다.
+미발견/저장된unknown에서 recovery_required=false일 수 있다. 이 필드만으로 안전한 재생성을 판단하지 않는다.
+
+queued/running: 기록된 진행 상태. ready 패널만 서명 URL이 있을 수 있다.
+worker_available=false이면 현재 실행 중/곧 완료라고 단정하지 않는다.
+running의 lease가 만료되면 GET 표현만unknown/recovery_required=true다. DB 상태 변경은 없다.
+completed: 저장 preview의ready/partial/failed를 확인한다. 모든 컷 실패여도completed일 수 있다.
+unknown: 부분ready 결과가 있어도 추가 자동 생성 금지. 원래 키를 유지한다.
+서명 URL은 기존300초 수명이며 GET으로 갱신한다. URL/claim_token/원문을 로그에 저장하지 않는다.
+
+추가 오류:
+503 COMIC_JOBS_UNAVAILABLE(DB 미설치/권한/연결/설정),
+502 COMIC_JOB_INVALID_RESPONSE(형식/소유권 오류).
+저장된 preview 조회에서는 기존404 COMIC_PREVIEW_NOT_FOUND,
+502 COMIC_STORAGE_INVALID_RESPONSE, 503 DIARY_STORAGE_NOT_CONFIGURED/DIARY_STORAGE_FAILED,
+503 DRAWING_READ_UNAVAILABLE(이미지 서명 실패, retryable=true)가 전달될 수 있다.
+DB가 실패한 경우 빈 결과로 처리하거나 새 키를 발급하지 않는다.
+
+GET은 SELECT와 준비된 이미지의 기존 Storage 서명만 수행한다.
+AI 호출/업로드/원장 RPC/상태 완료/일기 첨부를 하지 않는다. worker는 GET과 독립적으로 실행한다.
+
+6. FE가 연결할 흐름과 기존 API 유지
+
+기존 원문 확인 완료 → POST comic-plans → 기존 장면 글 확인 완료
+→ 고정 키로 POST comic-previews 한 번 →202이면 원래 키 GET 조회.
+응답 유실/네트워크 오류/COMIC_JOBS_UNAVAILABLE도 같은 키 GET으로 확인한다.
+권장 조회 간격1~2초는 FE 제안값이며 서버의 Retry-After 계약은 없다.
+연속 GET 오류는 대기 시간을 늘리거나 기존 작업 확인 안내로 전환한다.
+completed/unknown에서는 자동 폴링·생성 중단. URL 만료/수동 상태 확인은 같은 GET을 쓸 수 있다.
+미발견도 새 생성 허가가 아니다. retry_generation_allowed=false를 따른다.
+
+기본 그림일기 저장은 만화 실패와 분리해 계속 제공한다.
+일기 확정 응답의 diary_id와 연결 가능한 결과가 있을 때만 기존
+POST /api/diaries/{diary_id}/comics {"client_request_id":"<첨부용 고정키>","preview_id":"<UUID>"}
+를 쓴다. 생성 키와 첨부 키는 서로 다른 요청이다. 조회가 자동 첨부를 수행하지 않는다.
+첨부는200 ComicResponse, 주요409는 COMIC_NOT_READY/COMIC_PREVIEW_MISMATCH/
+COMIC_ALREADY_ATTACHED/IDEMPOTENCY_CONFLICT다. pending이 없고ready가 최소1컷이어야 하며
+원문·세션·초안·revision·확정 내용이 맞고 일기 edit_version=1이어야 한다.
+GET .../comic-previews/{preview_id}는 저장 결과 전용으로 작업 접수 조회를 대체하지 않는다.
+GET /api/diaries/{diary_id}/comics는 기존 current_edit_version/source_edit_version/
+content_status(none|current|stale)를 유지한다. 기존 일기 수정 후 만화를 재생성하지 않는다.
+
+합의가 남은 부분: 두 신규 경로와202/GET 응답의 공통 계약 편입, 기존 확인 화면의 연결 시점,
+키/session의 탭 종료 이후 보관 범위, 폴링 종료/unknown/partial/worker 불가 표시.
+BE의 로컬 구현 사실과 FE/AI/운영의 합의·활성화 완료는 구분한다.

@@ -1,0 +1,236 @@
+오늘,그리고 — 일기 수정·삭제·환불 v0.4 로컬 구현 보고
+
+2026-11-10 Asia/Seoul. 로컬 코드·SQL 후보·Fake/MockTransport 검증 완료.
+운영 DB/Storage/회원 A·B·C·D/FE·AI/배포 변경 없음. 아래 SQL은 실행하지 않았다.
+기존 v0.3.1 및 DB_INTEGRATION_PREP_20261110.txt의 일기ID별 지급 설명보다 이 문서의 날짜별 정책이 우선한다.
+
+2026-11-11 사전 점검 보완:
+  - fingerprint가 없는 과거 일기를 삭제하고 같은 날짜에 재작성하면 소급 보류를 우회하는
+    SQL 후보 결함을 수정했다. 보류 ID에 연결된 회원·날짜 전체를 검사하며 기존 행은 바꾸지 않는다.
+  - EditDatabase Fake가 fingerprint 자격을 누락했던 부분도 실제 SQL 조건에 맞췄다.
+    새 HTTP 회귀는 수정 전 30/1 잘못 지급으로 실패했고 수정 후 통과했다.
+    새 SQL 정적 검사는 회원별 날짜 연결 및 fingerprint/삭제 여부와 무관한 보류를 검사한다.
+  - 전체963개 통과(기준961+신규2,41.41초), 실패/오류/skip0, 통신/.env 차단시도0.
+    SQL 실행·실제 PostgreSQL 검증은 아니다. 날짜별 정책·소급 보류·환불/삭제 계약 변경 없음.
+  - 최신 DB/Render/실통합 준비: DB_INTEGRATION_PREP_20261110.txt.
+    FE 통합 참조: FE_API_CONTRACT_PHASE2.txt. 아래 기존 구현 기록은 보존한다.
+
+1. 구현 API와 실제 요청·응답
+
+모두 기존 Supabase Bearer 인증/오류 envelope/no-store를 사용한다.
+
+PUT /api/diaries/{diary_id}/edits — multipart/form-data, 200
+  필수: client_request_id(영문/숫자/_/- 1~128자), expected_version(정수 1~2147483646),
+        confirmed_text(공백 제외 내용이 있는 전체 본문, 1~20000자).
+  선택: file(PNG/JPEG 실제 바이트, 최대10 MiB·8192변·1600만 픽셀).
+  file 생략은 기존 그림 유지. 그림만 바꿔도 confirmed_text 전체를 전송한다.
+  중복 폼 필드/알 수 없는 필드/JSON/부적절한 버전/빈 본문을 거절한다.
+  응답: diary_id, edit_version, confirmed_text, updated_at, original_drawing.
+  original_drawing은 null 또는 기존 DrawingAsset DTO:
+    asset_id, asset_kind=original_drawing, mime_type, byte_size, width, height,
+    sha256, imageUrl, expires_at. 활성 그림을 의미하며 첫 원본 파일을 삭제하지 않는다.
+
+DELETE /api/diaries/{diary_id} — 204, 본문 없음
+  필수 헤더: Idempotency-Key(같은 요청 ID 규칙), If-Match: "2"(따옴표 포함한 조회 버전).
+  누락/약한 ETag/W/접두사/잘못된 버전은422 DIARY_EDIT_INVALID.
+  회원 소유권과 현재 버전 검사 후 논리 삭제. 같은 키·일기·버전 재전송은204.
+  같은 키에 다른 일기/버전은409 IDEMPOTENCY_CONFLICT, 다른 키로 이미 삭제한 일기는404.
+
+POST /api/shop/refunds — JSON, 200
+  요청: {"client_request_id":"refund_001","item_id":"chair_01"}
+  응답: item_id, refunded_coins, owned=false, wallet={coins,water_drops}.
+  실제 구매 영수증 price_paid만 코인으로 반환. 배치/활성 보유 함께 제거.
+  테마 영구 보유/적용 API와 기본 테마·1440×900 좌표·나무 규칙은 유지한다.
+
+오류:
+  DIARY_NOT_FOUND404, DIARY_EDIT_VERSION_CONFLICT409, DIARY_EDIT_INVALID422,
+  DIARY_EDIT_STORAGE_UNAVAILABLE503(retryable=true), ITEM_NOT_REFUNDABLE422,
+  ITEM_NOT_OWNED409, IDEMPOTENCY_CONFLICT409.
+  추가: PURCHASE_ALREADY_REFUNDED409 — 환불된 과거 구매 키 재전송. 새 키로만 재구매 가능.
+  기존 DRAWING_INVALID_IMAGE422/DRAWING_TOO_LARGE413/DRAWING_DIMENSIONS_EXCEEDED413 유지.
+  인증/일기 조회/방 저장소 장애에는 기존 오류도 그대로 적용한다.
+
+2. 기존 API의 추가·수정·삭제 필드
+
+GET /api/diaries/{diary_id} 및 기존 확정 응답 DiaryDetail:
+  edit_version(기존 일기1), updated_at(기존 confirmed_at 초기화) 추가. 기존 필드 제거 없음.
+  confirmed_text와 assets/imageUrl은 활성 수정본. confirmed_at은 최초 확정 시각이다.
+  ai_draft 안의 text/pages/sources와 confirmation_fingerprint/diary_messages는 원본 보존.
+  fingerprint가 없더라도 confirmed_at이 있는 기존 확정 일기는 수정 가능하며 보상 자격을 새로 만들지 않는다.
+GET /api/diaries?month=YYYY-MM: 응답 필드 동일, 삭제 행 제외, 수정된 본문 preview 표시.
+GET /api/me/room: inventory[].refundable, refund_coins 추가.
+  furniture/decoration은true와구매 당시 금액, theme은false/null.
+GET /api/shop/items: 필드 동일, 환불 후 owned=false. 구매 응답의 필드도 유지.
+POST /api/shop/purchases: 환불된 과거 키만 추가409로 차단. 일반 구매/동일 활성 구매 재전송은 기존200.
+POST /api/diaries/{diary_id}/drawing: 최초 저장용으로 유지.
+  수정 버전2 이상에서는409 DIARY_EDIT_VERSION_CONFLICT로 수정 API 사용을 요구한다.
+  늦게 도착한 최초 업로드 완료가 수정 버전의 그림을 바꾸는 것을 막는다.
+GET /api/diaries/{diary_id}/comics: 기존 필드에 아래 진단 필드만 추가한 로컬 후보다.
+  current_edit_version, source_edit_version(null 또는정수), content_status(none/current/stale).
+  status=ready는 이미지 준비 상태, content_status=stale은 과거 일기 버전이라는 별도 뜻이다.
+  삭제된 일기는 일기/만화 모두404. 생성 POST는503 유지, 자동 재생성/기존 결과 삭제 없음.
+  원문/장면 확인 증거와 생성·partial·unknown 계약은 여전히 FE·AI 합의 전이며 새로 확정하지 않았다.
+
+3. DB 후보와 기존 SQL 변경 사항
+
+별도 후보: supabase/candidates/diary_edits_refunds_v04.sql.
+의존 순서: 실제001~004 확인 → 기존room_rewards_v031 → 기존comic_previews_v1 → v0.4.
+005는 불필요하며 제외한다. 기존001~005/두 후보 원문은 바이트 보존했다.
+이번 후보는 기존 함수 교체/제약 변경을 포함하므로 기존 후보와 함께 별도 리뷰해야 한다.
+
+새 테이블4개:
+  diary_edit_requests: 회원별 키 고유, 요청 fingerprint/expected_version/본문/그림 metadata,
+    pending→completed 영수증과 당시 결과. 요청UUID별 private 그림을 보관한다.
+  diary_delete_requests: 회원별 키 고유, 일기/버전/삭제시각 영수증.
+  shop_purchase_receipts: purchase_id, member_id, item_id, client_request_id,
+    price_paid, purchased_at. 회원별 구매키 고유. 기존 활성 보유에서 영수증을 초기화한다.
+  shop_refund_receipts: 회원별 환불키 고유, purchase_id 고유, 금액/시각/응답 snapshot.
+    구매1건당1회 환불. 구매/환불 영수증에는 service_role UPDATE/DELETE 권한을 부여하지 않는다.
+
+diaries: edit_version/updated_at/deleted_at/active_drawing_edit_id 추가.
+  날짜 UNIQUE constraint를 같은 이름의 deleted_at is null 부분 unique index로 교체한다.
+  기존 회원·원문·원본그림 복합FK와 기존 요청 유일성은 유지한다.
+  active_drawing_edit_id는 동일 일기/소유자의 수정 영수증을 참조한다.
+member_daily_reward_grants: 기존(member_id,diary_id) PK/FK 보존,
+  UNIQUE(member_id,diary_date) 추가. 기존 중복이 있으면 설치를 중단한다. 행 삭제/자동 잔액 보정 없음.
+member_owned_items: purchase_id 필수 및 회원·상품 포함 복합FK 추가. 활성 보유만 삭제/재생성한다.
+diary_comics: source_edit_version=1 추가. 기존 결과는 첫 원본 버전이다.
+
+교체 RPC: confirm_member_diary(활성 날짜만 충돌), reserve/complete_diary_drawing(부모 live/version 잠금),
+  room_snapshot(환불 필드), member_room_command(날짜별 지급/구매 영수증/환불),
+  attach_diary_comic(삭제 제외/첫 버전만 원본 preview 연결).
+신규 RPC: member_diary_edit. server-only SECURITY INVOKER/빈 search_path.
+회원0→일기 행 잠금으로 확정/수정/삭제를 조정하고, 상점/지갑은 기존회원22 잠금을 공유한다.
+새 테이블 RLS, 일반 회원 직접 쓰기 금지, deleted 부모 제외 restrictive 정책을 추가한다.
+diary_assets 원본1개 유일 제약은 유지하며 수정 그림은 별도 영수증 JSON metadata에 저장한다.
+private 버킷과 UUID/UUID/original_drawing/UUID.png 경로는 유지한다.
+
+4. 보상·삭제·환불 중복 방지 결과
+
+보상은 회원/서울 diary_date 최초 확정1건만30코인/1물방울이다.
+삭제된 첫 확정도 자격 이력에서 유지하며, 지연된 최초 지급은 같은 sync로 복구 가능하다.
+소급 보류된 첫 일기를 삭제하고 새 ID를 만들어도 해당 날짜 보류를 우회하지 못한다.
+수정/삭제 API는 보상 RPC를 호출하지 않는다. 기존 확정 후 별도 sync 흐름/JSON은 보존했다.
+지급 기록과 원본 FK는 남고, 삭제 후 같은 날 새 일기 ID가 생겨도 지급은1회다.
+이미 지급한 보상을 삭제 때 자동 회수하지 않는 것이 이번 권장 후보이며 운영 전 확인 대상이다.
+
+환불은 회원 잠금/지갑 잠금/활성 보유/배치 삭제/코인 가산/영수증 INSERT가 하나의 DB 함수에 있다.
+같은 환불 키 재전송은 당시 응답 snapshot을 반환하므로 추가 반환/새 구매 취소가 없다.
+새 키 환불도 보유가 없으면409. 재구매는 새 구매 영수증이며 다시1회만 환불한다.
+다른 회원 보유/비보유는409, 보유 테마는422. 비활성 카탈로그 상품도 기존 보유라면 환불 가능하다.
+구매 중 요청은 동일 회원 잠금 뒤 확정된 활성 보유만 검사한다. 미확정 보유를 미리 환불하지 않는다.
+
+5. 이미지 저장·복구
+
+실제 PNG/JPEG 검증/PNG 정규화/메타데이터 제거를 재사용한다.
+원본 수신 바이트 hash+본문+expected_version으로 요청을 식별한다.
+예약 DB(pending) → x-upsert=false 업로드 → 완료 DB(본문/활성 그림/버전/영수증 동시 전환).
+이미 존재하는 객체는 실제 크기/hash를 확인한다. 불일치 파일은 완료 처리하지 않는다.
+업로드/DB 실패 때 기존 활성 본문·그림·버전을 유지한다. 완료 커밋 뒤 응답 유실은 성공 여부 불명503이다.
+같은키·같은본문·같은버전·같은파일 재전송으로 새 업로드/버전 증가 없이 복구한다.
+완료 영수증 재전송은 당시 버전 결과를 반환하고 서명URL만 새로 발급한다.
+서명 실패/잘못된 DB 성공 응답도200으로 표시하지 않는다.
+pending 요청끼리 경쟁하다 버전 충돌이 나면 비활성 private 객체가 남을 수 있다.
+DB와 Storage는 물리적으로 한 트랜잭션이 아니다. 자동 객체 삭제/만료 정책은 추가하지 않았다.
+재시작 후 같은 파일 바이트가 필요하며 서버가 잃어버린 바이트를 자동 복원하지 않는다.
+
+6. FE 전달 계약/적용 순서
+
+  1) 상세 GET의 confirmed_text/edit_version/assets[0].imageUrl을 불러온다.
+     그림판에는 활성 그림을 로드한다. URL은300초로 만료되므로 상세 GET으로 재발급한다.
+  2) 수정완료 클릭 시 전체본문과 expected_version, 새 client_request_id를 FormData에 넣는다.
+     그림이 바뀐 때만 file을 넣는다. 결과가 불명확하면 본문/버전/키/파일을 바꾸지 않고 재전송한다.
+     409 버전 충돌은 최신 상세를 다시 조회한 뒤 사용자가 수정 내용을 재확인한다.
+  3) 삭제는 FE 예/아니오 확인에서 예를 선택한 경우에만 DELETE한다.
+     아니오는 서버 요청 없음. BE가 실제 확인창 표시/사용자 클릭을 검증한 것은 아니다.
+  4) 환불 버튼은 refundable/refund_coins를 사용한다. 금액은 FE가 보내지 않는다.
+     새 구매/새 환불마다 새 키, 장애 복구에는 원래 키를 쓴다.
+     오래된 환불 응답은 당시 snapshot이므로 재구매 뒤 owned/잔액의 현재값으로 사용하지 말고 room/shop을 재조회한다.
+  5) 테마는 기존 구매→설정 PUT /api/me/room/theme, 기본은{"item_id":null}.
+     환불 버튼은 제공하지 않는다. 배경/표지/성체 테마/기존 가구 좌표 동작은 그대로다.
+  6) 만화 content_status=stale이면 이전 버전으로 만든 만화라고 표시한다.
+     GET으로 새 생성/업로드를 시작하지 않는다. 진단 필드도 FE 검토할 후보이며 FE 코드는 변경하지 않았다.
+
+OpenAPI에 multipart 필드·필수 DELETE 헤더·환불 모델이 노출된다. CORS If-Match를 허용한다.
+현재 운영001~004만 있는 DB에 이 코드만 먼저 배포하면 새 열/RPC 부재로 실패한다.
+실제 DB 검증/SQL 승인/적용과 API 배포 순서를 별도로 조율해야 한다.
+
+7. 회귀 검증
+
+BE .venv 사용, 전체961개 통과(17.31초), 실패/오류/skip0.
+기존890개 기반: 새 테스트 파일69개 + 추가 domain error 자동 parametrization2개.
+기존 동일날짜 중복 지급 기대값과 새 열/진단 필드 fixture만 최신 계약에 맞춰 조정했다.
+네트워크/실제 .env 차단 시도0. 외부 접속·실제 인증·계정/데이터 변경은 없다.
+Fake/Mock: 글만/그림만/동시수정, 기존 AI원본/대화 보존, pending/응답유실/rollback/재시작,
+동일 키/다른 키 경합/다른 회원/파일손상/잘못된DB성공, 삭제·재작성·지연/소급보류 보상,
+환불·재구매·재환불·당시가격/테마/회원격리/두앱경합, 만화stale/503와 이전 전체 회귀를 확인했다.
+새 SQL pglast 구문45문/함수본문7개 통과. 검사 SQL도 별도로 구문 확인한다.
+최초 전체 검사는 기존 Git snapshot 테스트의 샌드박스 소유권 오류로 중단했고,
+같은 네트워크/.env guard를 유지한 승인된 사용자 권한 실행으로 통과했다. 전역 Git 설정 변경 없음.
+개발 중 새 테스트 fixture/입력오류 매핑을 수정한 뒤 최종 전체를 통과했다.
+근거: ../../local-tools/be-v04/before.json, after.json, be-tests.xml, test-summary.json,
+sql-review.json, change-review.json. 실제 PostgreSQL 결과로 취급하지 않는다.
+
+8. 실제 DB 미검증/보존 한계
+
+PostgreSQL 실행/카탈로그 바인딩/함수 replacement/행잠금/권한/RLS/실다중연결 경합/
+예외 롤백/운영 JWT/Storage 서명·버킷정책/FE·AI 통합/Render는 미검증이다.
+신규 SQL 파일 작성/파싱은 운영 적용 완료가 아니다. 기존 A/B/C/D 데이터를 조회/수정하지 않았다.
+논리 삭제는 DB·Storage 영구 삭제가 아니다. 원문/AI초안/그림/만화/영수증이 남는다.
+일반 원본그림 신규 접근은 deleted 부모 정책으로 막도록 설계했으나, 이미 발급한 URL은300초 유효하다.
+만화 preview는 별도 세션 보관물이며 기존 preview 접근 정책을 유지한다.
+기존 세션 preview URL/기존 서명 URL까지 즉시 철회하거나 개인정보를 영구 삭제했다고 설명하지 않는다.
+
+9. Git 변경 목록
+
+기준 브랜치 feat/be-bootstrap / HEAD8648cbf954d353b99a9c3532ca364bfccf509b7e / staged0 유지.
+시작 추적수정7·미추적29항목의 기존 내용을 보존하고 필요한 파일에만 추가했다.
+AGENTS.md/PROJECT_STATUS.md는 로컬 ignore 유지. 스테이징/커밋/푸시/PR/병합/배포 없음.
+이번 변경 기존 파일:
+  app/api/comics.py
+  app/api/room.py
+  app/clients/comics.py
+  app/clients/diaries.py
+  app/clients/drawings.py
+  app/clients/room.py
+  app/comic_schemas.py
+  app/diary_schemas.py
+  app/main.py
+  app/room_schemas.py
+  app/services/comics.py
+  app/services/room.py
+  tests/fake_comics.py
+  tests/fake_room.py
+  tests/test_comics.py
+  tests/test_diary_rewards.py
+  tests/test_saved_diaries.py
+  PROJECT_STATUS.md(현재 상태 갱신)
+이번 신규 파일:
+  app/api/edits.py
+  app/clients/edits.py
+  app/edit_schemas.py
+  app/services/edits.py
+  docs/sql/v04_preflight.sql
+  docs/sql/v04_verify.sql
+  supabase/candidates/diary_edits_refunds_v04.sql
+  tests/fake_edits.py
+  tests/test_edits_refunds.py
+  tests/test_edits_refunds_sql.py
+  docs/DIARY_EDITS_REFUNDS_V04.txt(이 보고)
+파일 분리: API/DTO → repository/service → SQL 후보 → Fake/회귀 → FE 계약/점검문서.
+기존 미커밋 작업을 기능별로 stage/commit하는 작업은 하지 않았다.
+
+10. 배포 전 결정/검증
+
+삭제 시 기지급 보상 미회수 정책 최종 승인, 개인정보 영구 삭제/보존기한/만화 preview 보존,
+비활성 수정 객체 정리·바이트 재전송 보장, FE 확인창/충돌/만화stale UX 합의가 필요하다.
+실제 상품ID/가격/에셋 확정 전에는 운영 seed를 넣지 않는다.
+기존 SQL 후보/기존005를 포함한 자동 db push/migration up/reset을 실행하지 않는다.
+새 점검자료: docs/sql/v04_preflight.sql, v04_verify.sql. 실제 실행은 없으며 기존 통합 점검도 병행한다.
+전용 격리 PostgreSQL에서001~004/room/comic/v0.4 순서·최소권한·RLS·다중연결을 먼저 검증한다.
+room/comic 선행 객체가 없는 상태에서 v0.4 전용 점검을 단독 실행하지 않는다.
+별도 승인 후에만 쓰기중단/백업/짧은lock_timeout/단일READ COMMITTED 트랜잭션으로 검토한다.
+COMMIT 전 오류는 전체rollback. COMMIT 후 사용된 구매/환불/지급 기록은 삭제로 복구하지 않는다.
+기존 중복지급 날짜/객체명 충돌/예상외 권한/원본 변화가 있으면 중단하고 별도 보정 계획을 세운다.
+v0.4는 함수교체/새필수열이 있어 임의 코드 롤백도 안전하다고 가정하지 않는다. 다운그레이드 SQL은 미제공이다.
+운영 적용·테스트 계정·Storage/FE 실통합·배포는 별도 승인/검증 대상이다.

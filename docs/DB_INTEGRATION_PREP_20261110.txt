@@ -1,0 +1,513 @@
+2026-11-12 ?? ??: BE_MAIN_REVIEW_20261112.txt ??.
+??? ?? ?? ????? ????. room/comic/v0.4/jobs ?? ?? ? Render c75a9bc ?? ???
+?? ??? ???? ??? ????? ???. ?? ??? SQL? ????? ???.
+runtime factory? ??? worker ???? OpenAPI 202 ??? ????. ?? app? worker ?????.
+FE main? ?? API ??? ????? API? proposal ??? ????. 005? ??? ???.
+
+오늘,그리고 — 2차 DB·Render·실통합 사전 준비
+2026-11-11 Asia/Seoul. 로컬 준비·오프라인 검증만 수행.
+
+이 문서는 과거 v0.4 이전 절차를 현재 세 후보 기준으로 갱신했다.
+2026-11-11 후속: 사용자가 Q01~Q15 실행 결과를 전달했다. 출처·한계는 아래 0절 참조.
+4절 이후의 적용·데이터 검증·복구 절차는 향후 별도 작업이며 이번 실행 안내가 아니다.
+운영 상태는 사용자 실행 보고이며 Codex의 직접 검증이 아니다. 이번 실DB 조회/SQL 실행은 없다.
+현재 API 구현은001~004만 있는 DB에 먼저 배포하면 안 된다.
+FE: FE_API_CONTRACT_PHASE2.txt / AI: COMIC_PREVIEWS_V1.txt /
+수정·삭제·환불: DIARY_EDITS_REFUNDS_V04.txt. 기존 개인 검증자료와 A/B/C/D 기록은 보존한다.
+
+0. 실제 DB 읽기 전용 점검 — 사용자 실행 보고 수신, 추가 실행 없음
+
+최신 출처: 2026-11-11 사용자가 Supabase SQL Editor에서 Q01~Q15를 직접 실행했다고
+전달한 요약. Codex는 결과 원본/실행 시각/프로젝트 선택을 독립 검증하지 않았다.
+보고 내용: 001~004 이력 등록·005 미등록, 기존 public 3테이블 존재/RLS 활성,
+room9·comic3·v0.4 4·005 2테이블 부재, 기존 컬럼·PK/FK/UQ·인덱스 예상 일치,
+회원 SELECT/Storage 정책 존재, 핵심 RPC3개 service_role만 EXECUTE 가능,
+anon/authenticated BYPASSRLS 불가·service_role 가능, diary_assets 서버 UPDATE는
+upload_status/updated_at만 가능, 대상 사용자 트리거 없음, 기존3개 복합 타입 외 동명 타입 충돌 없음.
+이는 카탈로그 사전조건의 사용자 보고다. 정책 조건/함수 본문 동등성, 실제 RPC/RLS·잠금·
+롤백·Storage·데이터 불변식 검증이나 후보 적용 승인이 아니다. Q 전체를 반복할 필요는 없다.
+아래 감사·Q별 기준과 실행 순서는 기존 준비 자료로 보존하며 재실행 지시가 아니다.
+
+기준: feat/be-bootstrap / 32178bd382fd6a222a1466fd1e8c3f7cc2276e57.
+로컬 HEAD는 이번 재확인. origin·ls-remote 원격 일치는 이전 확인 기록이며 이번 원격 조회 없음.
+backup/be-phase1-success=8648cbf954d353b99a9c3532ca364bfccf509b7e,
+backup/be-phase2-original=81c0925b311143a1814cfaad89e431d984033c8f 로컬 보존.
+1차 백업 원격 SHA도 일치. 원본2차 백업의 동명 원격 ref는 조회 결과 없음(로컬은 존재).
+운영001~004 이력·구조는 위 사용자 보고로 갱신하며 직접 DB 검증은 하지 않았다.
+
+검토할 파일: docs/sql/integration_metadata_readonly.sql (신규 SQL 1개).
+기존 4개 점검 SQL의 카탈로그 조회를 재사용하고 아래처럼 분리·보완했다.
+모든 Q 블록은 독립 SELECT 1개이며 WITH도 조회만 수행한다. Q03만 이력 메타데이터
+테이블을 읽고 나머지는 시스템 카탈로그/접속 환경만 읽는다. 앱 테이블 행·COUNT 없음.
+auth.uid()/auth.jwt()/storage.foldername()도 호출하지 않고 함수 존재·서명만 확인한다.
+CHECK/정책/인덱스 조건 및 함수 본문에 있는 코드를 실행하지 않는다.
+관계·열·역할 이름과 ACL은 구조 메타데이터이며 회원 ID/이메일/토큰/본문/파일 경로가 아니다.
+기본값/정책 조건/함수 본문/인덱스 표현식 원문은 뜻밖의 리터럴 노출을 줄이기 위해 제외했다.
+
+기존 SQL 문장별 감사(문장 번호는 주석 제외, 세미콜론 기준; 행 번호는 원본 파일 기준):
+A=순수 메타데이터 조회, B=추가 검토 후 분리할 조회, C=이번 범위에서 실행 금지.
+기존 47문장은 모두 SELECT/WITH SELECT이며 DDL/DML/DO/CALL/명시 잠금은 없다.
+그러나 SELECT라는 이유만으로 이번 범위에서 모두 허용되는 것은 아니다.
+
+integration_preflight.sql (15문장):
+ #1 L2 A: DB/역할/버전 → Q01. DB명 postgres만으로 프로젝트를 식별할 수 없다.
+ #2 L3 B: 이력 테이블 부재/권한/구조 확인 필요 → Q02 통과 뒤 Q03.
+ #3 L4 B: 버킷 설정 메타데이터이지만 시스템 카탈로그 외 조회. 이번 분리본에서는 제외.
+ #4 L7-10 A: 기존3테이블 열 → Q05, 후보·의존 열까지 확장.
+ #5 L11-13 B: 없는 테이블의 ::regclass에서 오류 → Q06의 카탈로그 조인으로 보완.
+ #6 L14-15 B: public/storage 전체 정책 조건 원문 → Q08의 대상·명령·존재만 조회.
+ #7 L16 A: 역할/BYPASSRLS → Q10.
+ #8 L19-24 A: 후보/005 이름 존재 → Q04. 005는 예상외 설치 감지만 한다.
+ #9 L26-30 A: v0.4 열 흔적 → Q05.
+ #10 L31-32 B: indexdef 원문 출력 → Q07의 열 순서·unique·partial·valid로 제한.
+ #11 L33-41 B: 함수 서명/ACL + 전체 proconfig → Q09의 반환형/권한/search_path만.
+ #12 L42-45 B: 함수 정의를 출력할 뿐 실행하지는 않지만 하드코딩된 비밀값 가능성.
+                이번 분리본에서 함수 본문을 제외하며 정의 동등성은 미검증으로 남긴다.
+ #13 L48-51 C: 일기/대화/자산/Storage 객체 COUNT.
+ #14 L52-53 C: auth.users 회원 COUNT.
+ #15 L54-55 C: 일기/fingerprint COUNT.
+
+integration_verify.sql (11문장):
+ #1 L3-7, #2 L10-11, #3 L12-13, #4 L14-16, #5 L17-35, #6 L39-49 C:
+    운영 행/집계/회원·일기 ID/잔액·복구대기 조회. 모두 이번 범위에서 제외.
+ #7 L51-55 A: RLS/ACL → Q04.
+ #8 L56-63 B: 이름으로 지정한 역할 부재 시 권한 함수 오류 가능 → Q09 역할 OID 조인.
+ #9 L64 B: diaries/역할/열 부재 시 오류 → Q13.
+ #10 L65-74 B: 역할 이름 의존 + INSERT 열 권한 누락 → Q12/Q13 보완.
+ #11 L75 B: 버킷 설정 메타데이터, 이번 분리본 제외.
+
+v04_verify.sql (13문장):
+ #1 L2, #2 L3-6, #3 L7-8, #4 L9-11, #5 L12-14, #6 L15-17 C:
+    운영 일기/보유/그림/환불/보상 집계. 후보 미적용 DB에서는 열/테이블 오류도 가능.
+ #7 L18-20 A: 새4테이블 RLS → Q04.
+ #8 L21-22, #9 L23-25 B: 아직 없는 RPC/테이블/역할 이름 참조 → Q09/Q12.
+ #10 L26-27 B: 정책 schema 필터 없음 → Q08로 대상 한정.
+ #11 L30-33, #12 L36-49 C: 회원/날짜 및 잔액 운영 행 조회.
+ #13 L52-59 B: 역할 이름 의존 → Q12/Q13.
+
+v04_preflight.sql (8문장, 선행 후보 의존성 확인을 위해 추가 감사):
+ #1 L3-6, #2 L7-9 A: 후보 존재/열 → Q04/Q05.
+ #3 L10-13 B: room 객체 ::regclass 의존 → Q06.
+ #4 L15-17, #5 L18 C: 보상 날짜 중복/보유 운영 데이터 집계.
+ #6 L19-21 B: 정책 조건 원문 → Q08.
+ #7 L22 B: 버킷 설정 메타데이터, 이번 분리본 제외.
+ #8 L23-25 B: 전체 함수 proconfig → Q09의 search_path만.
+
+실행 금지 묶음:
+ 001~004 원본 migration 전부, room/comic/v0.4 후보 전부, 과거 dashboard_review_only.sql.
+ 002의 DO 버킷 검사도 제외한다. room은 LOCK/CREATE/INSERT/ALTER/GRANT/REVOKE와
+ 트리거를 포함한다. v0.4는 ACCESS EXCLUSIVE 잠금, UPDATE/INSERT 백필,
+ DROP CONSTRAINT, 부분 UNIQUE index 생성 및 함수 교체를 포함한다.
+ CREATE/ALTER/DROP/INSERT/UPDATE/DELETE/TRUNCATE/GRANT/REVOKE/DO/CALL,
+ SELECT FOR UPDATE/SHARE, advisory lock, EXPLAIN ANALYZE, 사용자 정의 함수/RPC 실행,
+ BEGIN/SET/COMMIT/ROLLBACK/NOTIFY 및 CLI migration 명령은 이번 실행 목록에 없다.
+ get_room/room_snapshot/comic_panels_valid도 이름·volatility만 보고 호출하지 않는다.
+ session_persistence_v005.sql과 미추적 표준005는 계속 제외. SESSION_STORE_MODE=memory 유지.
+
+사용자 진행 순서(이번에는 준비만; 먼저 SQL 내용을 사용자와 ChatGPT가 검토한다):
+ 1) 로컬 SQL 파일을 열고 실행하려는 Q 블록의 주석부터 세미콜론까지 내용을 공유·검토한다.
+    전체 파일/기존 preflight·verify/후보 bundle을 SQL Editor에 일괄 붙여 넣지 않는다.
+ 2) 향후 해당 블록 실행을 검토한 뒤 Supabase Dashboard에서 대상 조직과 프로젝트를 선택한다.
+    표시명만 믿지 말고 주소의 /project/<project-ref>/와 사용자가 보유한 운영 프로젝트 ref를
+    대조한다. branch 선택기가 있으면 운영 primary/main 대상인지 함께 확인한다.
+    프로젝트 ref는 현재 자동 확인하지 않았으며 여기서 값 제출을 요구하지 않는다.
+    Settings의 API key/DB 비밀번호를 열거나 공유할 필요가 없다. 불확실하면 실행 전 중단한다.
+ 3) 프로젝트 왼쪽 SQL Editor → 새 쿼리(New query 또는 +)를 연다.
+    승인된 Q 한 개만 빈 편집기에 붙인다. 기존 텍스트가 남아 있지 않은지 확인한다.
+    화면이 다르거나 Explorer만 보이면 DB SQL 편집기인지 먼저 확인하고 추측해 실행하지 않는다.
+ 4) 이번 준비 이후 승인된 시점에만 그 한 문장을 Run한다. 결과/오류를 확인하기 전 다음 Q 금지.
+    Q01 → Q02 → (Q02 통과 시 Q03) → Q04 → Q05~Q15를 한 블록씩 검토한다.
+    Q02가 0행, version 열 없음/사용자 타입/generated, view/foreign table, RLS=true이면
+    Q03을 실행하지 않고 이력 확인을 보류한다. 나머지 카탈로그 점검도 재검토 후 별도 진행한다.
+    Q03 recorded=false는 수동 Dashboard 적용 가능성 때문에 미적용의 확정 증거가 아니다.
+ 5) 공유할 것은 Q번호, 한국시간 실행 시각, 프로젝트 대조 완료 여부, 결과의 열 제목과
+    객체명/타입/제약/인덱스/정책 대상/역할·권한 boolean, 또는 비밀값을 가린 오류 코드다.
+    Q01의 프로젝트/DB/개인 역할 식별자는 필요하면 가린다. 0행도 Q번호와 함께 알린다.
+    결과 제한/잘림이 보이면 전체 확인 완료로 표시하지 말고 제한 여부를 알린다.
+    Dashboard 전체 화면, 키/연결 문자열/JWT/이메일/회원 ID/일기/Storage 경로는 공유하지 않는다.
+ 6) 후보 객체/005 흔적/예상외 동명 오버로드, 누락된 기본 객체, 권한 오류, invalid index,
+    다른 타입·제약·RLS·정책 대상, 예상치 못한 민감값이면 즉시 다음 블록도 중단한다.
+    해당 Q와 비식별 결과만 검토한다. 객체 삭제/권한 변경/이력 repair/재실행으로 맞추지 않는다.
+    모든 결과가 예상과 같아도 후보 적용/앱 호출/새 코드 배포로 자동 진행하지 않는다.
+
+Q별 비교 기준과 한계:
+ Q01 환경 참고; Q02~03 지정001~004 이력과 제외005 기록. 다른 버전의 전체 이력은 미조회.
+ Q04 관련19테이블(기존3+room9+comic3+v0.4 4), auth.users/storage.objects/storage.buckets
+     구조 존재와 RLS/ACL, 제외005 2테이블 감지. 후보16테이블은 최초 기준 모두 부재 예상.
+ Q05 기존 diaries.confirmation_fingerprint, diary_assets.upload_status/updated_at 확인.
+     v0.4 전에는 diaries.edit_version/updated_at/deleted_at/active_drawing_edit_id,
+     member_owned_items.purchase_id, diary_comics.source_edit_version이 없어야 한다.
+ Q06 diaries의 PK(id), UQ(id,user_id), UQ(user_id,diary_date), 회원FK와
+     diary_messages/diary_assets의 owner 복합FK·원본 장면 UQ를 001과 대조한다.
+ Q07 diaries_user_date_uq는 제약에 연결된 비부분 UNIQUE가 최초 기준이다.
+     diaries_user_confirmation_request_uq는 003부터 부분 UNIQUE다. 그 조건 원문은 미출력.
+     v0.4는 날짜 UQ를 같은 이름의 deleted_at IS NULL 부분 index로 바꾸는 의도적 변경.
+     reward_member_date_v04_uq, diaries_active_edit_v04_fk, owned_purchase_v04_fk는 미존재 예상.
+ Q08 001의 회원SELECT 정책3개, 002의 diary_storage_* 정책5개(guard4+own1)를 대조.
+     polcmd r=SELECT/a=INSERT/w=UPDATE/d=DELETE/*=ALL, polpermissive=false=제한 정책.
+     이름/역할/명령이 맞아도 정책 조건과 실제 접근 차단이 맞는지는 미검증이다.
+ Q09 기본 public RPC3개와 의존 auth.uid/auth.jwt/storage.foldername 서명 확인.
+     confirm_member_diary(uuid,text,text,integer,text,text,timestamptz,jsonb,jsonb)→uuid,
+     reserve_diary_drawing(uuid,uuid,text,bigint,integer,integer,text)→jsonb,
+     complete_diary_drawing(uuid,uuid,uuid)→void.
+     public 기본3개는 INVOKER(prosecdef=false), 빈 search_path,
+     anon/authenticated EXECUTE=false, service_role=true 예상. auth/storage 헬퍼에는 이 기준을
+     일괄 적용하지 않는다. 후보 함수9개 및 제외005 함수3개는 최초에는 부재 예상.
+     room4+comic4+v0.4 신규1; v0.4의 기존6함수 교체 의도는 2절과 원본 후보 참조.
+ Q10~13 역할 존재/BYPASSRLS/소유권/ACL 및 유효 스키마·테이블·열·함수 권한을 함께 본다.
+     NULL ACL은 권한 없음이 아니다. PUBLIC 기본/상속/소유권까지 권한 함수로 보완한다.
+     service_role의 auth.users 의존4열 SELECT, diaries/messages SELECT·INSERT,
+     diary_assets SELECT·INSERT 및 upload_status/updated_at UPDATE는 003~004와 대조.
+     diaries.id UPDATE는 comic 후보 후 의도한 추가다. 기존 DB에서의 부재만으로 오류 아님.
+     앱 테이블에 일반 역할 INSERT/UPDATE/DELETE/TRUNCATE 허용이면 중단·검토한다.
+     Storage 권한 boolean만으로 오류/허용을 단정하지 않는다(002 정책과 함께 후속 검토).
+ Q14 room_owned_catalog_guard/room_placement_usage_guard/room_theme_usage_guard는
+     room 이전에는 부재 예상. 예상외 사용자 트리거도 후속 검토한다.
+ Q15 후보 동명 타입 충돌 확인. 기존3테이블의 row type은 정상이다.
+
+남은 미검증: 001~004 정의 동등성의 독립 검증, RLS 실제 동작, 함수 실행·바인딩·반환 성공,
+정책 조건/함수 본문/CHECK/default 식의 동등성, 버킷의 실제 private 설정과 Storage 바이트,
+데이터 수량/내용/잔액/보상 중복/백필 가능성, 동시성·잠금·rollback·복구/백업/FE·AI 통합.
+메타데이터는 시점별 조회이므로 전체 DB의 동일 시점 스냅샷이나 설치 안전 보증이 아니다.
+보통 SELECT도 PostgreSQL의 내부 잠금은 사용할 수 있다. 여기서 제외한 것은 명시적
+테이블/행/advisory 잠금과 앱 트랜잭션이며, 무잠금·무부하 실행을 보증하지 않는다.
+예상 적용 순서001~004 확인→room→comic→v0.4는 비교 기준일 뿐 이번 적용 허가가 아니다.
+
+로컬 검증: BE 기존 .venv + 기존 pglast 파서로 기존47문장/신규15문장 구문 확인.
+신규15개 각각 단일 SELECT, 변경/잠금/트랜잭션/EXPLAIN/SELECT INTO AST 없음,
+호출14종 모두 pg_catalog 내장 허용목록, 참조는 카탈로그와 조건부 이력 테이블뿐임을 확인.
+001~004 및 세 후보에서 추출한19테이블/12함수 이름이 모두 점검문에 포함됨을 확인했다.
+파서는 DB 연결 없이 문자열만 분석했다. 실제 PostgreSQL 실행·바인딩 검증은 아니다.
+앱 코드 변경이 없어 BE 회귀 테스트는 재실행하지 않았고 기존963개 통과는 이전 기록이다.
+
+공개 공식 문서만 참고(프로젝트/DB 접속 아님, 2026-11-11):
+ https://supabase.com/docs/guides/database/overview — Dashboard SQL Editor 안내.
+ https://www.postgresql.org/docs/current/functions-info.html — 카탈로그/권한 조회 함수 의미.
+
+1. 시작 기준과 근거
+
+BE feat/be-bootstrap=10663b10b5ca71b4a1492b8df1edd4237f0446ca,
+backup/be-phase1-success=8648cbf954d353b99a9c3532ca364bfccf509b7e,
+backup/be-phase2-original=81c0925b311143a1814cfaad89e431d984033c8f.
+기존 한글 커밋12개와 로컬 백업2개 확인, 시작 추적수정/스테이징0.
+원격 ls-remote로 개발 브랜치10663b10/1차백업8648cbf 확인. 첫 네트워크 제한 후 읽기 전용
+외부 실행으로 재확인했으며 fetch/push 없음. 미추적 Supabase 설정2개와 표준경로005 보존.
+AGENTS.md/PROJECT_STATUS.md/실제 환경파일/개인 검증기록은 커밋 제외.
+
+근거: ../../local-tools/be-integration-prep/phase2-final-20261111/
+ before.json/after.json: 네 저장소 HEAD·branch·status·파일 해시.
+ be-tests.xml/test-summary.json:963개 결과와 통신/.env 차단 근거.
+ sql-review.json:12개 SQL/21개 함수본문 파싱. 실제 실행=false.
+ dashboard_review_only.sql:room→comic→v0.4 원문을 묶은 검토본,005 제외.
+ render-candidate/:별도 배포후보, SOURCES.json/FILES.txt 포함.
+ render-review.json/render-offline-tests.xml:파일 차이와201개 배포 회귀.
+기존 parser/오프라인 runner/배포 회귀를 재사용했고 패키지·환경·DB 도구 설치 없음.
+
+2. SQL 의존성·충돌·RPC·권한 검토
+
+순서: 실제001~004 확인 → room_rewards_v031.sql → comic_previews_v1.sql
+→ diary_edits_refunds_v04.sql. 현재 앱에는 v0.4까지 필요하다.
+room/comic 자체는 독립이지만 v0.4는 둘 모두에 의존한다. 단일 쓰기중단 창과
+READ COMMITTED 트랜잭션으로 세 후보를 적용하는 준비안이며 아직 실행하지 않았다.
+session_persistence_v005.sql 및 미추적 표준경로005는 이번 대상에서 제외한다.
+SESSION_STORE_MODE=memory 유지, db push/migration up/db reset 금지.
+
+001~004:
+ 001 diaries/diary_messages/diary_assets, 회원·일기 복합FK, 날짜UQ, 회원 SELECT RLS.
+ 002 diary-private 비공개 버킷/UUID 경로, 회원 직접 Storage 쓰기 제한.
+ 003 confirmation_fingerprint/회원별 확정키 UQ/confirm_member_diary/서버권한.
+ 004 원본그림 pending·ready와 reserve/complete RPC. 기존 원본1개 제약 유지.
+ 실제 운영 스키마/버킷/권한/함수 오버로드는 미조회이며 로컬 파일끼리 대조했다.
+
+room 후보:
+ 9테이블: member_reward_legacy_diaries, member_reward_wallets, member_daily_reward_grants,
+ shop_items, member_owned_items, member_room_placements, member_room_settings,
+ member_tree_states, member_tree_watering_events.
+ 함수4: room_guard_owned_catalog, room_guard_item_usage, room_snapshot, member_room_command.
+ 회원22 advisory lock→지갑행 lock, 물주기 날짜/요청키 UQ, 보유권 복합FK,
+ 카탈로그 FOR SHARE/종류·크기 고정 트리거로 회원격리·잔액·배치 범위를 방어한다.
+ 설치시 diaries SHARE lock 아래 기존 ID/소유자를 소급 보류 목록에 고정한다.
+ 기존 확정일기/그림/잔액을 소급 변경하지 않는다. 상품 seed 없음.
+ 설치 전 및 설치~배포 사이 작성분의 소급 취급은 별도 정책이다. 보류 목록 재생성/해제 금지.
+ 설치 후 과거 데이터를 수입/복원하면 보류 ID·날짜까지 고려하는 별도 계획이 필요하다.
+
+comic 후보:
+ 3테이블 comic_previews/diary_comics/comic_attach_requests, 함수4개.
+ 회원61→diary SHARE→preview UPDATE, owner복합FK/영수증/확정 snapshot 비교.
+ diaries.id UPDATE 열권한은 FOR SHARE용이며 일반 회원 쓰기 권한을 늘리지 않는다.
+ 기존002 경로의 두 번째 UUID에 preview_id 사용. 기존 diary_assets와 원본그림을 보존한다.
+ 생성 worker/queue가 아니라 이미 받은 결과의 저장·연결 후보다.
+
+v0.4 후보:
+ 4테이블 diary_edit_requests/diary_delete_requests/shop_purchase_receipts/shop_refund_receipts.
+ diaries에 edit_version/updated_at/deleted_at/active_drawing_edit_id,
+ member_owned_items에 purchase_id, diary_comics에 source_edit_version 추가.
+ updated_at=기존 confirmed_at, 구매 영수증=기존 보유 초기화는 새 메타데이터 백필이다.
+ 기존 본문/AI초안/대화/원본그림 바이트를 수정하지 않는다.
+ diaries_user_date_uq constraint를 같은 이름의 deleted_at is null 부분 UNIQUE index로 교체.
+ reward_member_date_v04_uq로 회원/날짜 중복 지급 차단, 기존 중복이 있으면 설치 실패.
+ 새 member_diary_edit와 기존6함수 교체: confirm_member_diary, reserve_diary_drawing,
+ complete_diary_drawing, room_snapshot, member_room_command, attach_diary_comic.
+ 교체 함수의 인자이름/타입/반환형은 유지한다. 실제 카탈로그 바인딩은 미검증이다.
+ 새 RPC는 server-only INVOKER/빈 search_path, 기존 함수 EXECUTE ACL은 적용 후 재확인한다.
+ 회원0→diary UPDATE→edit receipt UPDATE로 수정/삭제/확정을 조정한다.
+ 최초그림은diary SHARE→seed4, comic은회원61→diary SHARE→preview UPDATE,
+ room은회원22→지갑/보유/상품 잠금. 확정커밋 뒤 별도 sync이므로 확정lock과 중첩하지 않는다.
+ 실제 다중 연결의 교착·잠금대기·rollback은 미검증이다.
+
+005(검토만/적용 제외): chat_sessions/chat_requests 및 reserve/transition/confirm 함수3개.
+ 003 확정 RPC를 재사용하고 다른 후보와 CREATE 이름 중복 없음. 회원직접읽기/쓰기 금지.
+ 후보와 표준경로005는 시작부터 CRLF/LF 차이가 있지만 개행 정규화시 내용 동일. 양쪽 바이트 보존.
+
+이름 대조 결과:
+ 신규 CREATE 테이블/함수/정책/트리거/명시인덱스 비의도 중복0(005 중복보관본은 한 번만 집계).
+ 신규열·명시제약도 테이블별로 대조했다. 날짜UQ→부분인덱스 및6함수 교체는 의도한 변경.
+ 기존 원문/자산 FK는 유지한다. 실제 카탈로그 충돌은 적용 전 조회해야 한다.
+ SQL12개 및 함수본문21개 파싱 통과는 SQL 실행·객체 바인딩·RLS 성공 증거가 아니다.
+
+Python/RPC 대조(실제 payload key):
+ confirm_member_diary(p_user_id,p_session_id,p_client_request_id,p_history_revision,p_fingerprint,
+   p_weather,p_confirmed_at,p_ai_draft,p_messages)→uuid; services/diaries.py, clients/diaries.py.
+ reserve_diary_drawing(p_user_id,p_diary_id,p_mime_type,p_byte_size,p_width,p_height,p_sha256)
+   →자산jsonb; complete_diary_drawing(p_user_id,p_diary_id,p_asset_id)→void; clients/drawings.py.
+ member_room_command(p_member_id,p_action,p_payload)→action별jsonb; clients/room.py/services/room.py.
+   get_room/list_items/sync_rewards/purchase/refund/place/remove_placement/theme/water와 DTO 대응.
+ member_diary_edit(p_user_id,p_diary_id,p_action,p_payload)→reserve/finish 영수증jsonb,
+   delete:{deleted:true}; clients/edits.py/services/edits.py. 식별자/결과필드도 재검사한다.
+ save_comic_preview_result(p_preview,p_fingerprint),
+ complete_comic_preview_asset(p_user_id,p_preview_id,p_asset_id),
+ attach_diary_comic(p_user_id,p_diary_id,p_preview_id,p_request_id)→preview 또는error jsonb;
+   clients/comics.py의 StoredPreview/충돌코드와 대응한다.
+ 005 payload는 clients/sessions.py의 reserve/transition/confirm과 대응, 이번 기본모드와 무관.
+ PostgREST/SQL 실호출 없이 정적 대조와 Fake/MockTransport 검증만 했다.
+
+3. 발견 결함과 보상·환불·삭제 경계
+
+높음 / 실제DB 적용 전 해결 대상 → 로컬 수정 완료, 실PostgreSQL 재검증 필요:
+ 기존 v0.4는 fingerprint 있는 최초 일기ID만 보류목록과 비교했다. fingerprint 없는 과거
+ 일기를 삭제하고 같은 날짜에 새 ID로 작성하면 보류를 우회해30/1 지급할 수 있었다.
+ 수정: 보류ID→원본일기 회원/날짜를 연결해 날짜 전체를 제외한다. 기존 행/지갑 변경 없음.
+ Fake의 fingerprint 자격 누락도 보정했다. 신규 HTTP 회귀에서 수정 전 잘못 지급을 재현했고,
+ 수정 후 통과했다. 회원별 날짜 연결/삭제·fingerprint와 무관한 보류 SQL 정적검사도 추가했다.
+ 이는 날짜별1회·과거 소급 보류 정책의 집행 보완이며 API/환불/삭제 정책 변경이 아니다.
+
+검증 SQL 보완:
+ integration_preflight: v0.4 부분 생성 테이블/열/인덱스/함수 충돌 조회 추가.
+ integration_verify: 복구대기를 ID별→회원/날짜별로 집계, 삭제재작성 ID의 오탐과 보류 우회 제거.
+ v04_verify: 보류날짜 우회지급0행, 구매/환불원장 잔액 대조, 새4테이블 쓰기권한 조회 추가.
+
+정책과 경계 검토:
+ 보상은 회원별 서울 diary_date 최초 확정에30/1이다. 삭제된 첫 확정도 지연 지급 자격으로 남는다.
+ 확정 뒤 별도 sync 실패는 저장을 취소하지 않는다. {} sync로 복구하며 자동 지급 후 []는 정상이다.
+ 수정/삭제는 보상을 호출하지 않고 현재 자동 회수도 없다. 미회수 최종 승인은 기존 정책 확인 대상이다.
+ 구매/환불은 회원22·지갑 잠금, purchase_id당 환불1회, 회원별 요청키 고유성을 사용한다.
+ 실제 price_paid 환급·배치 해제·활성 보유 삭제·영수증 추가가 한 DB 트랜잭션이다. 테마 환불은 불가하다.
+ 같은 환불키는 당시 snapshot을 재생하므로 재구매를 취소하지 않는다. 환불된 구매키는409다.
+ expected_version/요청 fingerprint/영수증으로 수정 경합과 응답 유실을 방어한다.
+ 본문·활성그림·버전은 함께 전환하지만 DB와 Storage는 별도 트랜잭션이다. 같은 파일 바이트가 필요하다.
+ 논리 삭제만 수행하며 원문/원본그림/보상/만화/회원 데이터를 보존한다. 회원 직접 쓰기는 금지한다.
+ 구매/환불 영수증은 서버 UPDATE/DELETE도 금지한다. service_role은 계속 서버 신뢰 경계다.
+ deleted 부모 restrictive RLS와 BE 필터로 조회를 차단한다. 기발급 URL은최대300초,
+ 별도 세션 preview는 보존된다. 최초 업로드 완료는 버전1만 허용하며 이전 만화는 stale만 진단한다.
+
+4. 실제 DB 적용 전·후 절차 — 이번 미실행
+
+대상 프로젝트 불명,001~004 정의 불일치, 후보 객체 존재, 이력 불명, 백업 복구 가능성 미확인,
+쓰기 중단 불가, 잔액·원본 불변식 위반이면 중단한다. 데이터 삭제/IF NOT EXISTS로 강행하지 않는다.
+
+별도 승인 후 담당자 순서:
+ 1) 프로젝트·역할·service_role BYPASSRLS·private 버킷·정책·백업/복구 가능성을 확인한다.
+    무료플랜 백업/PITR를 가정하지 않는다. 스키마/기존 회원·일기·원문·자산 ID/수량/체크섬과
+    Storage 바이트를 접근 제한된 곳에 보관한다. metadata 수량은 바이트 백업 증거가 아니다.
+ 2) 확정/업로드/수정/구매 등 쓰기를 중단하고 기준 수량을 고정한다. A/B/C/D로 테스트하지 않는다.
+ 3) integration_preflight.sql로 실제001~004와 신규 객체 부재를 조회한다. 부분 적용이면 중단한다.
+ 4) 동일 연결에서 BEGIN; SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+    SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='60s';
+    room 전체→comic 전체→v0.4 전체 순으로 검토한 원문을 사용한다.
+    v04_preflight는 room/comic 선행 객체가 필요하므로 동일 트랜잭션 중 v0.4 직전 조회용이다.
+    이 조회를 위해 room/comic만 먼저 COMMIT하지 않는다. 기존 부분 상태는 별도 계획부터 세운다.
+ 5) 같은 연결에서 integration_verify+v04_verify와 원본 ID/체크섬/Storage 보존을 검사한다.
+    첫 설치 기준 지급/지갑/보유/물사용0, 보류수량=기존 일기수, 불변식 위반0,
+    회원 직접 쓰기/RPC 실행false, 서버 RPC 실행true, INVOKER/빈 search_path여야 한다.
+    새 열/부분 index/함수 교체/서버 열권한/Storage 정책도 확인한다.
+ 6) 실패/lock_timeout/권한 오류/원본 변화면 COMMIT 전에 ROLLBACK한다.
+    검토 bundle의 마지막 COMMIT까지 한 번에 실행하면 중간 결과를 보고 중단할 수 없다.
+    동일 연결에서 검증 후 커밋을 제어할 수 있는 실행 방법부터 확보한다.
+    통과 후 NOTIFY pgrst,'reload schema'; COMMIT; 뒤 재조회/PostgREST 반영을 검사한다.
+ 7) 별도 승인된 BE 배포와 전용 T1/T2·테스트 상품으로만 실검증한다. A/B/C/D sync/쓰기는 금지한다.
+
+쓰기 재개 전 실PostgreSQL 필수 검증:
+ 함수 바인딩/실권한/RLS(anon,T1,T2,service_role), FK/제약, 두 연결의 지급·구매환불·물주기·
+ 수정 경합과 rollback, 자정 경계, 응답 유실 영수증, fingerprint 유무별 과거 날짜 보류,
+ 삭제 후 재작성/조회 차단, 원본그림·만화 보존.
+실검증 환경은 아직 없으며 이번에 새 설치나 운영 실험을 하지 않았다.
+Dashboard 수동 적용은 CLI 이력을 자동 기록하지 않는다. SQL 해시/승인/실행자/시각/결과를 기록하고
+후속 이력 정리 전 CLI 자동 적용을 금지한다. 미실행005를 적용 완료로 repair하지 않는다.
+
+4-1. 격리 PostgreSQL 검증 실행표 — 환경 확보 후 담당자가 체크, 현재 전부 미실행
+
+실행 대상은 운영과 분리된 기존 검증 DB와 합성 T1/T2만이다. 현재 psql/pg_ctl/postgres/
+docker/podman을 PATH에서 찾지 못했다. 설치·새 프로젝트 생성·접속은 하지 않았다.
+Supabase auth.uid/auth.jwt/storage 의존성과 anon/authenticated/service_role 권한을 갖춘
+환경인지 먼저 확인한다. 단순 PostgreSQL에서 헬퍼를 우회하는 stub만으로 RLS 통과를 선언하지 않는다.
+공통 기록: 대상/버전·후보 SHA256·연결 A/B·역할/JWT 주체·입력키·예상/실제 결과·전후 불변식.
+운영 회원 자료를 복제하지 않고 합성 원문/그림/보류일기(fingerprint 유/무)를 준비한다.
+
+[ ] 설치/바인딩: 4절 3~6번을 동일 연결 A에서 실행한다. 파일은
+    supabase/candidates/room_rewards_v031.sql → comic_previews_v1.sql → diary_edits_refunds_v04.sql.
+    v04_preflight는 comic 뒤, 검증 SQL 두 개는 v0.4 뒤에 실행한다. 005는 읽어 적용하지 않는다.
+    기대: 기존3+신규16테이블, 핵심 RPC 인자/반환형은 2절과 일치, 교체6함수·추가 열권한 정상.
+    설치 중간에 강제 오류를 넣는 별도 합성 검증에서는 ROLLBACK 후 신규 객체/백필 잔존0,
+    원본/기존 ACL 보존을 확인한다. 정상 설치도 검증 전 COMMIT하지 않는다.
+[ ] 실역할: 관리자 결과와 분리해 anon·authenticated(T1/T2)·service_role로 실행한다.
+    T2 JWT로 T1의 일기/원문/자산/만화 읽기0, 회원 직접 쓰기/서버 RPC 거부,
+    service_role은 2절 payload로 실제 RPC 실행 성공을 확인한다. BYPASSRLS 값만으로 대체하지 않는다.
+[ ] 보상: 설치 전 보류일기를 삭제→같은 서울 날짜 새 ID 확정→sync. fingerprint 유/무 모두0지급.
+    설치 후 신규 날짜 최초 확정→sync 재전송/삭제재작성은 합계30/1 한 번만 지급.
+    연결 A BEGIN→sync RPC→미커밋 유지, B 같은 회원 sync 시작→대기 확인→A COMMIT→B 결과 확인.
+    B는 중복지급0; A ROLLBACK 변형은 B가 한 번 지급. 회원별 날짜 원장·지갑을 함께 대조한다.
+[ ] 구매/환불/물주기: 같은 방식으로 A가 RPC 뒤 잠금을 유지하고 B가 동일키/다른키 요청을 보낸다.
+    구매↔환불 경합, 환불→재구매→과거 환불키 재전송, 같은 서울 날짜 물주기를 각각 검증한다.
+    기대: 음수잔액/이중환급/이중차감0, 과거 영수증이 새 보유를 취소하지 않음, 날짜당 물사용1.
+    자정 경계는 격리 테스트의 시간 제어 근거를 남긴다. now()/트랜잭션 시작일만 바꾼 모의로 대체하지 않는다.
+[ ] 수정/삭제/그림/만화: A 수정/삭제와 B 같은 expected_version 수정·최초그림 완료·만화첨부를 경합시킨다.
+    COMMIT/ROLLBACK 각각 확인. 본문·활성그림·버전·영수증이 함께 전환되고 패자는 충돌/비노출이어야 한다.
+    수정 후 최초그림 완료가 활성그림을 바꾸지 않음, 원본/만화 보존, current→stale, 삭제 조회 차단 확인.
+[ ] 응답 유실/복구: 합성 요청의 COMMIT 뒤 클라이언트 응답만 버리고 동일키·동일 입력으로 재시도한다.
+    수정/삭제/구매/환불/첨부의 영수증 재생, 입력 변경409, 중복 행/보상0을 확인한다.
+    DB rollback과 Storage 업로드 유실은 별개로 검증하며 같은 이미지 바이트를 보관한다.
+    AI unknown은 자동 재생성하지 않는다. 저장/Storage 검증 성공을 AI 실행기 성공으로 표시하지 않는다.
+[ ] 교착/복구: 위 경합의 잠금대기·종료시간·SQLSTATE를 기록하고 timeout/취소 후 열린 트랜잭션이
+    남지 않게 ROLLBACK한다. 6절의 COMMIT 전/후 복구와 구버전 활성그림 비호환을 별도로 확인한다.
+
+중단: 환경/역할 불명, 의존성·타입·정의 불일치, 후보 부분존재, 권한 과다/누락, 예상 밖 timeout/
+deadlock, 중복 지급/환급, 원본 변화, 회원 간 노출, rollback 잔존, 결과 불명 중 하나라도 발생.
+기록하고 해당 연결을 rollback/상태 확인한 뒤 원인을 해결한다. 재적용·데이터 삭제·권한 확대 금지.
+통과 증거와 4절의 백업/쓰기중단/복구 조건 없이는 운영 적용이나 새 BE 선배포를 진행하지 않는다.
+
+5. Render 소스 반영 준비
+
+원본: ../../deploy/today-and-near-render, 로컬 main719b352f12e7cf1e9019e62a016576e313c92ba4.
+시작 작업트리는 깨끗했다. SOURCES.json의 BE=8648cbf954d353b99a9c3532ca364bfccf509b7e,
+AI=fae1f0276f3ffccadf1fdce46b6f379a4f803ca9. 현재 Render 실행커밋/대시보드/원격HEAD는 미조회다.
+BE 원본 push만으로 독립 배포 소스가 동기화되지 않는다. 기존 온라인 성공은 사용자 보고로 보존한다.
+
+2026-11-11 이번 재대조: 현재 BE HEAD32178bd3 런타임39파일은 기존 격리 후보와 모두 일치.
+기존 config 기본 URL 치환과 CRLF/LF 정규화만 허용해 비교했다. 현재 누락 기능/추가 의존성 없음.
+근거: ../../local-tools/be-integration-prep/preintegration-20261111/source-review.json.
+후보 SOURCES의 BE_runtime_base=10663b10은 과거 생성 기준이다. 이번 소스 일치는 이 별도 근거로
+기록하며 기존 후보/manifest/배포 원본을 덮어쓰지 않는다. 201개 배포 회귀는 이전 결과다.
+팀 코드 도착 뒤 차이만 처리: 수신 SHA 고정 → BE 어댑터 변경분·AI 실행파일/새 import·requirements
+대조 → 필요한 supervisor 환경 허용목록/시간 예산 차이 검토 → 별도 새 후보에만 반영 →
+FILES/SOURCES 재생성·기존 오프라인 배포 회귀/smoke. FE 코드는 이 BE+AI 후보에 복사하지 않는다.
+AI 신규 요구가 없다면 supervisor/예산/005/memory 설정을 임의 변경하지 않는다.
+
+격리 후보: 근거폴더/render-candidate. 기존 배포 main/설정/AI 파일은 수정하지 않았다.
+BE 런타임39파일(app38+requirements) 반영: 신규16/변경7/나머지16은 개행 정규화시 동일하다.
+ 신규: api comics/edits/room; clients comic_ai/comics/edits/room/sessions;
+ comic_schemas/edit_schemas/room_schemas/persistent_session_store;
+ services comic_images/comics/edits/room.
+ 변경: clients diaries/drawings; config/diary_schemas/main; services chat/diaries.
+정확한 목록/해시는 render-review.json에 있다. requirements는 바이트 동일, 추가 의존성 없음.
+config의 Supabase 기본 URL은 기존 배포 방식대로 example로 치환했고 운영환경 값은 읽지 않았다.
+session 모듈은 import를 위해 포함하지만 memory 기본/005 제외를 유지한다. 후보에 SQL/환경파일/venv 없음.
+
+Dockerfile/supervise.py/AI 전체 파일은 바이트 동일하다. AI127.0.0.1:8002, BE PORT기본10000,
+각1worker·별도 가상환경, AI readiness→BE health 순서다. AI_MODE기본mock,
+실텍스트 모드openai+TEXT_PROVIDER=groq|openai 선택·키 허용목록·BE Secret 격리를 보존한다.
+supervisor는 SESSION_STORE_MODE를 전달하지 않아 memory 기본으로 기동한다.
+기존 SUPABASE_URL/PUBLISHABLE_KEY/SECRET_KEY/ALLOWED_ORIGINS/timeout 전달은 보존한다.
+AI일기100초/BE요청135초·read130초 예산도 기존과 같다. 만화 실행기는 활성화하지 않았다.
+
+후보 모듈 출처 확인 후 기존 배포 회귀201개 통과(9.53초), 실제HTTP/.env 차단.
+변경 없는100초 실시간 대기1개는 deselect했다. 이전99.531045초는 과거 근거이며 이번 재측정이 아니다.
+모드·비밀격리 회귀는 원본과 바이트 동일한 supervisor를 검사한다.
+추가 candidate-smoke.json: 후보 main 앱 lifespan, Auth/대화/초안/저장/그림/보상/구매/배치/환불/
+물주기/기본테마/수정/삭제/타회원 차단, 만화 생성503, DELETE CORS 헤더를 Fake/Mock로 통과했다.
+후보 OpenAPI의 모든 /api method/path가 FE 문서에 있는지도 대조했다(openapi.json).
+첫 smoke 실패는 도구가 prepare의 반환값을 session_id로 잘못 사용한 문제였으며 도구 수정 후 통과했다.
+Python 구문/파일 목록/해시/AI·실행관리자·Dockerfile·requirements 보존을 확인했다.
+Docker/psql/pg_ctl은 PATH에서 미발견. Docker 빌드/Linux wheel/컨테이너/메모리/종료신호는 미검증이다.
+
+Render Free 위험(공식 문서 조회이며 계정 조회 아님):
+15분 유휴 절전·다음 요청 기동 약1분, 재시작/절전시 로컬파일 유실, 임의 재시작 가능.
+memory 미확정 세션/체크포인트 전 바이트 유실과 절전 중 worker 진행 불가를 고려해야 한다.
+무료시간·대역/빌드 한도와 현재 계정 잔여량은 구분하며 후자는 미확인이다.
+BE+AI+이미지 디코딩 합산 RSS/실부하를 측정해야 한다. 서비스별 세마포어는 전체 메모리 상한이 아니다.
+근거: https://render.com/docs/free (2026-11-11 조회).
+행 잠금의 열 UPDATE 권한: https://www.postgresql.org/docs/current/sql-select.html .
+
+코드 선배포 금지 경로: diary의 deleted_at/edit_version/active_drawing_edit_id,
+room/shop/tree의 member_room_command·환불 필드/영수증, comics의 source_edit_version 의존성.
+health200/Auth 성공은 스키마 준비 증거가 아니다. 스키마 없음을 빈 목록/none으로 숨기지 않는다.
+
+6. 중단·복구
+
+COMMIT 전 실패: 같은 연결 ROLLBACK→부분 객체 부재/기존 ID·체크섬/Storage 보존 확인.
+COMMIT 응답 유실: 결과 불명으로 중단→카탈로그 조회. SQL 전체 재실행 금지.
+COMMIT 후 새 쓰기 없음: 새 경로 중단→기존 배포와 스키마 호환성 검증→별도 승인 후 복귀.
+배포719b352/BE백업8648cbf는 보존됐지만 당시 실행 이미지는 이번에 조회하지 않았다.
+v0.4 수정·삭제·환불 사용 후 단순 구버전 복귀를 안전하다고 가정하지 않는다.
+구버전은 active_drawing_edit_id를 읽지 않아 수정그림 대신 최초그림을 보일 수 있다.
+먼저 영향 경로 쓰기를 중단하고 필요시 조회도 점검모드로 전환, 새 스키마 호환 수정배포를 준비한다.
+구버전의 deleted RLS/재작성/확정 응답/활성그림 조회 검증 전에는 서비스를 재개하지 않는다.
+Render 롤백 버튼 가용범위만 믿지 않고 보존 SHA/아티팩트/환경설정 기준을 사용한다.
+다운그레이드 SQL/테이블 DROP/보류·지급·구매·환불기록 삭제/Storage 삭제로 되돌리지 않는다.
+전체 백업 복원은 이후 작성일기 유실 위험이 있어 영향 분석과 별도 승인이 필요하다.
+정상 미지급은 같은{}sync, 수정/환불 응답 유실은 같은 요청, 과지급은 별도 보정안 승인을 따른다.
+만화 unknown은 AI를 자동 재호출하지 않고 같은 바이트 복구 가능성과 기존 일기 성공을 구분한다.
+
+7. FE·AI 도착 후 실통합 체크리스트
+
+O=BE 오프라인 검증 완료, D=실제DB 적용/검증 필요, F=FE 준비 필요, A=AI 준비 필요,
+I=실통합 검증 필요, P=정책/설정 결정 필요. O는 운영 성공이 아니다.
+모든 실검증은 별도 승인된 T1/T2·합성데이터로 수행하고 기존 A/B/C/D와 과거 기록은 보존한다.
+
+항목 | 상태 | 합격/후속 기준
+새 가입·이메일 확인 | O/F/I/P | Auth31개 회귀 유지; 실제메일/SMTP/redirect/만료·재사용·재발송 미검증
+로그인·빈 달력 | O/F/I | 유효회원 월별[]; 타회원/익명 통과 없음
+대화→초안→확인 | O/F/A/I | 원문/버전 일치, Mock·실모드 구분, 확인 전 저장 없음
+그림→확정 저장 | O/D/F/I | 확정200→별도그림200→달력/상세/새로고침, 원본 보존
+최초 보상30/1 | O/D/F/I | 날짜지급1행/지갑30/1, 자동sync 후 명시sync=[] 허용
+같은 날 중복·삭제재작성 | O/D/F/I | 동일/동시 요청·새ID에도 날짜별1회
+과거 소급 보류 | O/D/I/P | fingerprint 유무 모두 보류; 해제는 별도 정책
+상점 조회·구매 | O/D/F/I/P | 승인 상품/가격/에셋 준비 후 잔액/보유/재전송 일관
+배치·이동·배치해제 | O/D/F/I | 정수1440×900 경계/크기 검사, 보유 유지/테마 배치 금지
+환불·재구매 | O/D/F/I | 실제 구매가1회 환급/배치 해제/과거키가 새 구매 취소하지 않음
+물주기·성장 | O/D/F/I | 서울 하루1회·물방울1개 차감·누적7회 성체·재시도 차감 없음
+테마 구매·적용 | O/D/F/I/P | 구매/적용 분리, 기본 복귀/성체asset/좌표·성장 보존, 에셋 확정
+기존 일기 조회 | O/D/F/I | 본문/대화/AI초안/원본그림/ID 보존
+본문·그림 수정 | O/D/F/I | 전체본문+선택file, 버전충돌409/같은 바이트 재시도/원본 보존
+확인창 뒤 삭제 | O/D/F/I/P | 아니오 요청0/예204/같은키204; 기지급 미회수 최종 확인
+삭제 후 조회 차단 | O/D/F/I/P | 목록 제외·상세/comics404; URL/preview 보존 한계 확인
+4컷 미리보기·저장·조회 | O/D/F/A/I/P | 지금503; 실행기/확인 증거/AI계약 준비된 경우만 생성 검증
+수정 후 만화stale | O/D/F/I | ready와stale 구분, 자동 재생성/삭제 없음
+실패·재시도·재로그인 | O/D/F/A/I | 키 보존/유실 복구/unknown 자동 재생성 없음/회원 격리
+재시작·Render 절전 | F/A/I | memory 미확정 세션 유실 안내, 저장결과 DB 재조회;005 활성화 없음
+
+시각/대상SHA/시나리오/예상·실제HTTP코드/비식별request_id/전후 수량을 기록한다.
+중복 지급/원본 변화/타회원 접근/정의 불명 오류면 해당 쓰기를 중단하고6절을 따른다.
+실회원/일기/상품/Storage 생성·모델 호출은 이번 범위가 아니다.
+
+8. 완료·보류 및 문제 분류
+
+완료: 시작상태/백업/원격HEAD, SQL 의존성·권한·RPC 정적 대조, 보류 우회 최소 수정,
+전체 회귀/점검SQL 보완, FE 실제API·AI 미합의 항목, 격리 Render 후보/검증, 실통합/복구 계획.
+기준961개40.81초→최종963개41.41초, 실패/오류/skip0, 실제통신/.env 접근시도0.
+신규2개는 과거날짜 삭제재작성 HTTP 회귀와 회원별 날짜 보류 SQL 정적검사다.
+기존 테스트 삭제/완화 없음. Fake만 실제 fingerprint 자격에 맞게 보정했다.
+
+통합 전 차단: 실DB 검증/승인/세 후보 적용 없이는 새BE 배포 불가. FE 실연결·메일설정·상품에셋 미완료.
+4컷을 포함한다면 확인 증거·AI 응답·실제worker/바이트 checkpoint가 추가 차단조건이다.
+4컷을 제외한 기존 그림일기 통합은 별도로 진행할 수 있다.
+DB 적용 전: 보류 우회 수정의 실PostgreSQL 재현, 바인딩/RLS/권한/동시성/복구,
+백업/쓰기중단/기존 중복·부분상태/COMMIT 전 검증 가능한 연결 확보가 남아 있다.
+FE·AI 확인: DTO 수락/에셋 매핑/확인창·충돌/stale·partial·unknown/원문·장면 증거,
+길이 초과/이미지 출력/비용·재시도/지속성 실행/바이트 복구/편집 후 만화 재생성 범위.
+추후 개선·정책: 비활성 업로드/preview 보존기한·영구삭제·기지급 미회수 최종 확인,
+자동 지급 최대10초 추가 지연 감시·실메모리 측정·선택적005 실검증.
+미합의 항목을 완료로 표시하거나 공통API를 임의로 변경하지 않았다.
+
+미실행: push/PR/병합/main 변경/이력 재작성/백업 삭제, 실DB 접속·적용/migration,
+상품 등록/실회원·일기 변경/Storage 쓰기/모델 호출/Render·Cloudflare 배포/FE·AI 원본 수정.
+현재 요청에서는 커밋·푸시·PR·병합을 수행하지 않는다. 최신 결과는 로컬 PROJECT_STATUS.md 참조.

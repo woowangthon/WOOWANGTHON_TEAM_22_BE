@@ -1,0 +1,211 @@
+2026-11-12 ?? ??: BE_MAIN_REVIEW_20261112.txt ??.
+??? ?? ?? ????? ????. room/comic/v0.4/jobs ?? ?? ? Render c75a9bc ?? ???
+?? ??? ???? ??? ????? ???. ?? ??? SQL? ????? ???.
+runtime factory? ??? worker ???? OpenAPI 202 ??? ????. ?? app? worker ?????.
+FE main? ?? API ??? ????? API? proposal ??? ????. 005? ??? ???.
+
+오늘,그리고 — 요청별 복구 조회 API 제안 계약
+2026-11-11 Asia/Seoul / BE feat/be-bootstrap / 기준 HEAD 32178bd
+
+상태: 로컬 구현 후보. FE 담당자와 미합의이며 운영 제공·2차 통합 성공을 뜻하지 않는다.
+FE 원본 수정/메시지 전송/배포/SQL 적용 없음. 김성은 담당자에게 전달할 연결 자료다.
+
+1. 기존 수단과 판단
+
+기존 GET /api/diaries/{id}는 현재 활성 글·그림·edit_version만 반환한다.
+다른 요청이 같은 글과 다른 그림을 저장하거나 버전이 바뀌어도 내 요청의 완료 증거가 아니다.
+기존 GET /api/me/room의 watered_today·stage도 특정 요청의 영수증이 아니다.
+오늘 false 또는 성체/오늘 true로 어제 결과 불명 요청을 해제하면 안 된다.
+
+PUT edits와 POST water의 같은 ID 재전송은 멱등 복구를 제공하지만 쓰기 명령이다.
+영수증이 없을 때 실제 수정을 시작하거나 현재 서울 날짜의 물주기를 실행할 수 있다.
+따라서 이번 조회 전용 요구에는 부족하다. 기존 RPC에 조회 전용 action은 없다.
+일기 최초 확정용 DiaryRepository.find_request는 수정 영수증 조회가 아니다.
+DrawingRepository.edited_assets는 현재 활성 request UUID의 그림만 읽으며 원래 client_request_id,
+fingerprint, result를 대조하는 API가 아니다.
+
+FE bce4af3dc99e06f5b4d05e0e1aa39f7fa5713b27 수신본 index.html:
+- checkEdit(2309행): 상세 GET의 버전/본문/pictureSaved로 완료 또는 재저장 가능을 판단한다.
+  같은 버전이라는 이유로 미완료 확정하는 분기도 미커밋 쓰기와 경합할 수 있다.
+- checkRoom(2715행): room 조회 성공만으로 waterUnknown=false가 되고,
+  waterTree(2726행)는 날짜가 달라지면 남은 waterReq를 제거한다.
+이 근거는 ../local-tools/phase2-recheck-20261111/received.json, INTEGRATION_REPORT.txt,
+browser/results.json, FE_FIX_REQUEST.txt와 해당 fe/index.html을 재사용했다.
+이번에는 FE/AI 수신·브라우저 재실행을 하지 않았다.
+
+2. DB 계약·권한 검토 (실행 아닌 로컬 SQL 검토)
+
+supabase/candidates/diary_edits_refunds_v04.sql:
+- diary_edit_requests: UNIQUE(user_id, client_request_id), request_id, diary_id,
+  fingerprint, expected_version, confirmed_text, drawing, state(pending/completed), result.
+- reserve는 원본 파일 바이트 SHA256을 포함한 fingerprint를 저장한다.
+- finish는 일기 본문/활성그림/버전과 완료 영수증/result를 같은 트랜잭션에서 변경한다.
+  result는 당시 diary_id/edit_version/confirmed_text/updated_at/original_drawing이다.
+  새 그림이 있으면 drawing.id=request_id이고 ready 그림이 result와 일치한다.
+- authenticated는 SELECT만, RLS는 본인·비익명·completed·live 부모 일기만 허용한다.
+  일반 회원 조회에서 pending이 안 보이는 것은 정상이며 부재를 실패로 해석할 수 없다.
+- service_role에는 이미 SELECT/INSERT와 drawing,state,result 열 UPDATE가 있다.
+  이번 API는 기존 서버 클라이언트로 SELECT만 수행한다. 새 GRANT/RPC 불필요.
+
+supabase/candidates/room_rewards_v031.sql 및 v0.4의 member_room_command:
+- member_tree_watering_events: UNIQUE(member_id, client_request_id), UNIQUE(member_id, watered_on).
+- 물 차감/성장/영수증 INSERT가 같은 트랜잭션에 있다. watered_on은 회원 잠금 후 서울 처리일.
+- authenticated는 자기 member_id의 SELECT만 가능하며 비익명 조건이 있다.
+  service_role SELECT 권한도 이미 있다. water RPC는 기존 ID 영수증을 먼저 확인한다.
+- 물주기 입력은 ID뿐이므로 별도 fingerprint나 요청 날짜 입력이 없다.
+
+결론: 기존 SQL 후보의 구조·권한으로 BE 최소 조회 구현 가능. SQL 변경 및 신규 권한 없음.
+서비스 키 조회는 RLS 소유권 필터에 의존하지 않으므로 서버가 인증한 회원 ID로 반드시
+user_id/member_id + client_request_id를 필터링하고 반환 행의 소유자/키도 재검증한다.
+수정은 먼저 회원 JWT/RLS로 본인 live 일기 소유권을 확인한다. 타 회원/삭제/없는 일기는404.
+같은 회원의 키를 다른 본인 일기에 재사용한 경우도 감지하기 위해 영수증은 회원+키로 읽고
+diary_id를 대조한다. 영수증은 최대2행을 요청해 중복행이면503으로 거절한다.
+
+운영에는 room/v0.4 테이블이 아직 없다는 기존 사용자 Q01~Q15 보고가 있다(직접 미검증).
+운영에서 지금 제공 가능하다는 판단이 아니다. 기존 후보의 별도 검증/적용이 전제이며
+순서001~004 확인→room→comic→v0.4, 005 제외 및 SESSION_STORE_MODE=memory를 유지한다.
+실제 PostgreSQL/RLS/service_role 동작·PostgREST 노출/스키마 캐시는 이번에 검증하지 않았다.
+
+3. 공통 규칙
+
+Authorization: Bearer <Supabase 회원 access_token> 필수. GET 본문 없음.
+client_request_id: 영문/숫자/_/- 1~128자. 응답 Cache-Control:no-store, X-Request-ID 유지.
+회원 ID/역할/날짜는 FE가 지정하지 않는다. 기존 PUT/POST 요청·성공 응답은 변경하지 않았다.
+복구 GET은 RPC, 업로드, 서명 URL 발급, 보상 지급, 수정 재시도, 물주기 재시도를 하지 않는다.
+
+200 status=completed: 정확히 해당 요청의 완료 영수증을 확인했다.
+200 status=unknown: 완료를 확인하지 못했다. 부재와 pending을 실패로 확정하지 않는다.
+HTTP 오류/타임아웃/잘못된 응답: FE는 기존 unknown을 유지한다.
+어떤 경우도 unknown에서 자동으로 새 ID/같은 ID PUT·POST를 실행하지 않는다.
+
+PostgreSQL SELECT에 행이 없어도 예약 INSERT나 물주기 트랜잭션이 아직 커밋되지 않았을 수 있다.
+여러 번 조회해도 비어 있다는 사실, 같은 edit_version, 날짜 변경, 경과 시간은
+처리 중 요청이 없다는 증명이 아니다. 이번 API는 안전한 재전송 승인 기능을 제공하지 않는다.
+
+4. A — 원래 일기 수정 요청 조회
+
+GET /api/diaries/{diary_id}/edits/{client_request_id}
+필수 query:
+  fingerprint: 원래 PUT 입력의 SHA256 소문자 hex64 (계산법 아래)
+  expected_version: 원래 PUT에 보낸 정수1~2147483646
+다른 query 필드는422. fingerprint를 현재 상세의 글/그림/버전으로 재계산하지 않는다.
+
+요청 예:
+GET /api/diaries/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/edits/edit-1?fingerprint=ab1b85594ee7b30d4a5bfef3ef87093284bf68a0e2e6dd25c30846221156dbd5&expected_version=1
+Authorization: Bearer <member_access_token>
+
+완료200:
+{"diary_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","client_request_id":"edit-1","fingerprint":"ab1b85594ee7b30d4a5bfef3ef87093284bf68a0e2e6dd25c30846221156dbd5","expected_version":1,"status":"completed","edit_version":2}
+결과 불명200:
+{"diary_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","client_request_id":"edit-1","fingerprint":"ab1b85594ee7b30d4a5bfef3ef87093284bf68a0e2e6dd25c30846221156dbd5","expected_version":1,"status":"unknown","edit_version":null}
+
+응답 diary_id/client_request_id/fingerprint/expected_version은 조회 대상 값이다.
+unknown 응답의 fingerprint는 입력 echo이며 저장된 영수증이 있다는 뜻이 아니다.
+completed에서는 영수증의 회원/키/일기/fingerprint/expected_version, state/result,
+결과 버전=expected_version+1/본문/그림 ready 및 새 그림 영수증 동일성을 검증한다.
+일치하는 영수증이 있어도 pending이면unknown. 다른 본문/파일/버전/일기로 같은 키를 조회하면409.
+
+completed.edit_version은 당시 완료 버전이다. 현재 활성 버전/그림임을 보장하지 않는다.
+나중에 다른 수정이 완료되었다면 현재 상세는 더 새 버전일 수 있다.
+FE는 완료된 원래 요청을 정리한 뒤 상세 GET으로 현재 화면을 갱신하되, 원래 요청과
+다른 화면/편집 세션에 늦은 조회 응답을 적용하지 않는다. 원래 글·Blob을 그 전까지 보존한다.
+404도 과거 수정이 실패했다는 증거는 아니다. 삭제/접근 불가 UI와 결과 불명 보존을 구분한다.
+
+fingerprint 계산은 기존 app/services/edits.py의 PUT 알고리즘과 동일하다:
+SHA256(UTF8(JSON({client_request_id, confirmed_text, expected_version, file_sha256})))
+- 키 순서는 위의 알파벳 순서로 고정. JSON 공백 없음, Unicode는 UTF8 그대로.
+- expected_version은 JSON 숫자. 텍스트 trim/Unicode 정규화/줄바꿈 변환 없음.
+- file_sha256은 실제 전송 Blob 원본 바이트의 SHA256 소문자 hex64, 파일 생략은null.
+- 저장된 Drawing.sha256은 PNG 정규화 후 해시이므로 file_sha256 대신 쓸 수 없다.
+- 실제 PUT 직전에 요청의 본문/버전/Blob을 고정하고 fingerprint를 계산해 보관한다.
+  원래 Blob이 없어 fingerprint를 재구성할 수 없으면 조회 입력을 추측하지 않는다.
+
+FE 연결 예시(원본 FE 파일에는 적용하지 않음):
+async function sha256Hex(bytes) {
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
+}
+async function editFingerprint(req) {
+  const fileHash = req.blob == null ? null : await sha256Hex(await req.blob.arrayBuffer());
+  const canonical = JSON.stringify({
+    client_request_id: req.client_request_id,
+    confirmed_text: req.confirmed_text,
+    expected_version: req.expected_version,
+    file_sha256: fileHash
+  });
+  return sha256Hex(new TextEncoder().encode(canonical));
+}
+const query = new URLSearchParams({fingerprint: savedFingerprint, expected_version: String(req.expected_version)});
+// 기존 api helper로 GET. savedFingerprint는 원래 요청에서 저장해 둔 값.
+const receipt = await api(`/api/diaries/${diaryId}/edits/${req.client_request_id}?${query}`);
+// 모든 대상 식별값 일치 + status==='completed' 때만 원래 요청 완료 처리.
+
+검산 벡터(파일 없음):
+{"client_request_id":"edit-1","confirmed_text":"수정한 일기","expected_version":1,"file_sha256":null}
+→ ab1b85594ee7b30d4a5bfef3ef87093284bf68a0e2e6dd25c30846221156dbd5
+이 fingerprint는 인증 토큰/비밀키가 아니며 회원 인증과 소유권 검사를 대체하지 않는다.
+
+5. B — 원래 물주기 요청 조회
+
+GET /api/me/tree/water/{client_request_id}
+날짜 query/요청 body 없음. 로그인 회원과 원래 ID만 사용한다.
+
+GET /api/me/tree/water/water-20261110-1
+Authorization: Bearer <member_access_token>
+
+어제 완료된 영수증을 오늘 조회한200:
+{"client_request_id":"water-20261110-1","status":"completed","watered_on":"2026-11-10"}
+결과 불명200:
+{"client_request_id":"water-20261110-1","status":"unknown","watered_on":null}
+
+watered_on은 DB에 저장된 실제 서울 처리일이다. 조회일이나 FE 요청 생성일로 바꾸지 않는다.
+물주기 영수증 행은 차감/성장과 함께 커밋되므로 별도 state 열 없이 확인된 행만completed다.
+다른 회원의 같은 ID는 그 회원의 영수증으로 대체하지 않는다(본인 행 없으면unknown).
+현재 wallet/tree를 섞어 반환하지 않는다. 완료 확인 뒤 room GET으로 현재 화면을 갱신한다.
+당일/다음날/성체 여부와 관계없이 unknown이면 원래waterReq와waterUnknown을 보존한다.
+completed로 과거 요청을 해결한 다음, 오늘 상태를 확인하고 사용자의 새 물주기 의사에 따라
+새 ID를 만든다. 조회 성공 자체가 오늘 물주기를 자동 실행할 근거는 아니다.
+
+6. 오류 예시와 처리
+
+409 fingerprint/expected_version/일기 불일치:
+{"error":{"code":"IDEMPOTENCY_CONFLICT","message":"같은 요청 ID의 내용이 달라요.","retryable":false},"request_id":"req_example"}
+원래 요청을 보존하고 잘못된 키/입력 조합을 확인한다. 원래 요청의 성공/실패 판정이 아니다.
+
+503 수정 영수증 DB 장애/권한 문제/미설치/잘못된 영수증:
+{"error":{"code":"DIARY_EDIT_STORAGE_UNAVAILABLE","message":"수정·삭제 결과를 확인할 수 없어요. 같은 요청 ID로 다시 확인해 주세요.","retryable":true},"request_id":"req_example"}
+503 물주기 영수증 조회 장애:
+{"error":{"code":"ROOM_STORAGE_UNAVAILABLE","message":"방 저장소를 사용할 수 없어요.","retryable":true},"request_id":"req_example"}
+retryable=true는 이 GET을 다시 조회할 수 있다는 뜻이며 PUT/POST 재전송 허가가 아니다.
+
+404 본인 live 일기 확인 불가:
+{"error":{"code":"DIARY_NOT_FOUND","message":"일기 없음","retryable":false},"request_id":"req_example"}
+422 잘못된 경로 ID/누락 또는 잘못된 query: 기존 VALIDATION_ERROR 외피.
+401 AUTHENTICATION_FAILED/403 ACCESS_DENIED 및 기존 인증503/502 유지.
+수정의 선행 일기 소유권 조회 실패는 기존 DIARY_STORAGE_* 오류를 그대로 반환한다.
+모든 오류/네트워크 유실은 FE에서 unknown을 유지하고 원래 요청·Blob을 임의 폐기하지 않는다.
+
+7. 구현·검증 범위
+
+기존 변경: app/main.py (조회 router/service 조립만 추가).
+신규: app/api/request_recovery.py, app/clients/request_recovery.py,
+app/services/request_recovery.py, app/request_recovery_schemas.py,
+tests/test_request_recovery.py, 이 제안 계약 문서.
+PROJECT_STATUS.md는 로컬 전용 갱신. 기존 문서2/미추적4/후보 SQL은 보존한다.
+
+테스트는 BE .venv, 합성회원/Fake DB/MockTransport/ASGI만 사용한다.
+응답 유실/재시작/중복 GET, pending/미커밋 부재, 다른 요청 그림 저장, 과거 완료 버전,
+같은 키의 다른 입력/버전/일기, 타 회원/삭제/미존재, 서울 자정 및30일 전 영수증,
+동시 쓰기 중 조회, DB timeout/5xx/권한/미설치/중복행/잘못된 영수증을 검증한다.
+조회에 따른 RPC/Storage/상태 변경과 자동 재시도가 없는지도 확인한다.
+전체 BE 테스트 결과와 보존 해시는 ../local-tools/be-request-recovery-20261111/에 기록한다.
+최종 전체1035개 통과(기존963+신규72), 실패/오류/skip0,87.32초.
+full.xml/full-summary.json 기준 외부 통신·실제 환경 파일 접근 차단 기록0.
+초기 실행기의 Windows self-pipe 차단과 불필요한 소유권 반환열 검사를 수정한 뒤의 결과다.
+Windows asyncio 내부 socketpair 외 실제 네트워크와 실제 .env 접근은 차단한다.
+
+미검증: 실제 PostgreSQL 격리수준/다중 연결 경합/잠금/rollback, 실제 권한/RLS/JWT/Storage,
+운영 후보 적용·배포, FE JS 연결·브라우저 및 FE↔BE↔AI 2차 통합.
+Mock에서의 지연/부재 검증은 PostgreSQL의 모든 스케줄을 증명하지 않는다.
+기존 회원 데이터 접근, 005 적용, SESSION_STORE_MODE 변경, 패키지 설치,
+커밋/푸시/PR/병합은 하지 않는다. PR은 2차 통합 성공 후 별도 요청까지 보류한다.

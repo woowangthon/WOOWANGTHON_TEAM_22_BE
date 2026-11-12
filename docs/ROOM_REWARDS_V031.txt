@@ -1,0 +1,121 @@
+오늘,그리고 — 보상·상점·방·나무 로컬 구현 v0.3.1
+
+2026-11-11 정리: 아래는 v0.3.1 구현 당시 기록이다. 현재 코드에는 v0.4가 함께 포함된다.
+최신 정책은 회원별 서울 날짜의 최초 확정 일기에 한 번만 30코인·물방울 1개를 지급하며,
+수정·삭제·삭제 후 같은 날 재작성으로 중복 지급하지 않는다.
+아래 일기 ID별 지급/기존 DTO 설명은 DIARY_EDITS_REFUNDS_V04.txt의 날짜별 정책과
+환불 필드 설명으로 대체된다. room 후보만으로 현재 코드를 배포하지 않는다.
+DB 후보 순서는 001~004 확인 → room → comic → v0.4이며 모두 운영 미적용 상태다.
+세션 migration005는 이 순서에 필요하지 않으며 별도의 미적용 후보로 보존한다.
+
+상태: 로컬 구현 및 오프라인 회귀 완료. 운영 DB 적용·배포·상품 등록 없음.
+사용자가 보충한 v0.3.1이 기준이며, 이전 1000×600 제안은 사용하지 않는다.
+
+1. 구현 API
+
+모든 경로는 Supabase Bearer 토큰 검증 후 회원 ID를 결정한다.
+  GET    /api/me/room                         200 방·지갑·나무·보유 상품
+  POST   /api/me/rewards/sync                 200 {new_rewards, wallet}
+  GET    /api/shop/items                      200 {items}
+  POST   /api/shop/purchases                  200 {item_id, owned, wallet}
+  PUT    /api/me/room/placements/{item_id}     200 {item_id, position}
+  DELETE /api/me/room/placements/{item_id}     204 본문 없음
+  PUT    /api/me/room/theme                    200 {theme, tree}
+  POST   /api/me/tree/water                    200 {watered_on, wallet, tree}
+
+본문과 응답은 app/room_schemas.py 및 /openapi.json에 정의한다.
+클라이언트의 member_id·가격·잔액·날짜·성장량 등 추가 본문 필드는 거절한다.
+구매/물 주기 client_request_id는 기존 BE 요청 ID 규칙(영문·숫자·_·-, 1~128자)을 사용한다.
+GET은 보상을 지급하지 않는다. 기존 일기 저장 JSON을 유지하며 확정 저장 후 별도 보상 RPC를 연결했다.
+
+2. 좌표와 에셋 계약
+
+room은 1440×900 고정 무대다. x/y와 상품 크기는 같은 px 단위이며 좌상단 기준이다.
+x/y는 JSON 정수만 허용한다. 소수(1.0 포함)·문자열·bool·null·누락·잘못된 JSON·
+음수·경계 초과는 422 ROOM_POSITION_INVALID다.
+DB 상품 크기를 이용해 0 <= x <= 1440-width, 0 <= y <= 900-height를 검사한다.
+가구끼리 겹침 허용, z-index 저장 없음. 같은 회원·상품의 배치는 하나다.
+테마 배치는 422 ITEM_NOT_PLACEABLE, 미보유 상품 사용은 409 ITEM_NOT_OWNED다.
+DELETE는 보유권을 유지하고 배치만 제거한다. 미배치 보유 상품의 반복 DELETE는 204다.
+
+기본 배경/표지는 room_default, cover_default다.
+0~6단계 나무는 tree_stage_0~tree_stage_6, 기본 성체는 tree_adult_default다.
+테마 성체는 DB shop_items.adult_tree_asset_key를 사용한다.
+이 값들은 계약상 식별자이며 이미지 파일의 존재·경로·업로드를 의미하지 않는다.
+테마를 구매해도 자동 적용하지 않는다. 적용/기본 복귀 시 성장·잔액·배치·기존 일기는 유지한다.
+
+3. 최신 보상 정책 및 구성 (2026-11-10)
+
+정상 확정 일기 1개당30코인·1물방울을 서버가 결정한다. 별도 시작일 설정/DTO/분기 없음.
+app/services/room.py는 명령과 응답을 검증하고 app/clients/room.py는 서버 키 전용3인자 RPC를 호출한다.
+app/room_schemas.py의 DiaryReward는 기존 {diary_date,coins,water_drops} JSON을 유지한다.
+app/config.py에는 보상 날짜 설정이 없고 .env.example도 날짜 변수 없이 정책을 설명한다.
+app/main.py가 RoomService를 DiaryService에 주입한다. 새 API나 일기 저장 요청/응답 변경은 없다.
+
+SQL 후보는 표준 migrations 밖 supabase/candidates/room_rewards_v031.sql이다.
+기존001~004의 diaries/id+user_id·fingerprint·Auth 권한을 재사용하며005에 의존하지 않는다.
+기존001~005 파일/기존 RPC/Storage 정책은 변경하지 않았다.
+신규9테이블: 기존 지갑·지급·상품·보유·배치·설정·나무·물사용8개와 소급 보류 목록1개.
+지급 PK는 (member_id, diary_id)이며 날짜는 응답 속성이다. 하루 한 권 제약은 그대로다.
+구매 요청 UQ·물사용 요청/서울 날짜 UQ·owner 복합FK·잔액/성장 CHECK·배치/크기 트리거를 유지한다.
+함수4개는 INVOKER/빈 search_path·service_role 전용 EXECUTE다. 일반 회원은 자기 자원 SELECT만 가능하다.
+카탈로그 SHARE 잠금을 위한 service_role의 shop_items.item_id 열 UPDATE 권한도 유지한다.
+
+4. 과거 일기 소급 보류와 재시작 복구
+
+설치 시 단일 READ COMMITTED 트랜잭션 안에서 diaries SHARE 잠금 후 기존 일기 ID/소유자를
+member_reward_legacy_diaries에 스냅샷한다. 기존 지갑/일기/그림은 변경하지 않는다.
+이 목록은 지급 영수증이 아니고 소급 결정 보류 목록이다. 서버 SELECT만 허용하고 자동 해제하지 않는다.
+목록 밖의 새로운 fingerprint 확정 일기만 지급하며 날짜 범위 필터는 없다.
+보류된 과거 일기의 저장 요청 재전송/sync도 지급하지 않는다. 일괄 소급 기능은 없다.
+설치 전 작성분/설치와 배포 사이 작성분의 소급 여부는 사용자 결정 대상이다.
+설치 뒤 과거 데이터 수입/복원도 별도 보류 등록 설계 없이는 진행하면 안 된다.
+이 명시적 DB 구분을 추가하므로 POST /api/me/rewards/sync 본문{}를 그대로 유지할 수 있다.
+
+DiaryService.confirm의 세 성공 경로가 _confirmed_detail로 합류한다.
+일기 저장 커밋/상세 조회 후 별도 RoomService sync를 시도한다. 실패는 고정 경고만 남기고 저장 성공을 유지한다.
+기본 최대10초 DB timeout에 따른 저장 응답 지연은 가능하다. 백그라운드 실행기/자동 큐는 없다.
+프로세스 종료/확정 응답 유실/지급 실패 뒤에는 영구 일기행 - 보류 목록 - 지급 기록으로 재시도 대상을 찾는다.
+같은 저장 요청 재전송 또는{} sync로 복구한다. 임시 초안/대화/저장 롤백은 일기행이 없어 지급하지 않는다.
+회원 잠금(seed22)과 지갑행 잠금 아래 지급 INSERT RETURNING과30/1 증가를 한 트랜잭션으로 실행한다.
+재지급을 유발하는 응답 유실/다중 앱/반복 sync는 diary ID PK로 방어한다.
+저장 시 자동 지급된 건은 나중의 sync new_rewards에서 빠질 수 있다. FE는 wallet을 기준으로 갱신한다.
+기존 JSON/정액 필드는 유지한다. GET room은 지급을 시작하지 않는다.
+
+5. 상점·방·물 주기 안전성
+
+모든 재화 명령은 같은 회원 잠금과 지갑행 잠금을 사용한다. 지갑/지급/구매/물 이력은 함께 커밋 또는 롤백한다.
+구매는 같은 요청ID/상품을 추가 차감 없이 복구하고 다른 상품은 IDEMPOTENCY_CONFLICT다.
+판매 중지 이후도 기존 구매 영수증으로 복구한다. 새 요청의 중복 보유는 ITEM_ALREADY_OWNED다.
+물 사용은 같은 요청을 먼저 복구하고 성체·오늘 사용·잔액을 검사한다. 누적7회이며 성체 뒤 차감하지 않는다.
+서울 처리일은 회원 잠금 후 DB clock_timestamp로 계산한다. 클라이언트 날짜/금액을 받지 않는다.
+재전송은 최초 잔액 스냅샷이 아니라 현재 지갑/나무를 반환하며 watered_on만 원래 날짜를 보존한다.
+상품 seed/실제 에셋은 없다. 빈 상점/지갑/나무와 테마·정수 좌표 계약은 기존대로다.
+
+6. 검증 및 실제 적용 준비
+
+기존877개 전체 회귀 유지+신규13개=890개 통과(16.19초), 실패/오류/skip0.
+네트워크/실제.env 차단시도0. BE .venv/Fake/MockTransport만 사용했다.
+그림일기·그림·세션·만화·이메일·구매/지급/물사용 혼합 경합 회귀를 포함한다.
+신규 확정 후 지급·두 세션 모드·재시작·회원 격리·동시 요청·지급 실패/timeout/결과불명·소급 보류를 검증했다.
+같은 날짜 다른 일기ID는 식별자 모형 검증이며 실제 하루 한 권 제약은 변경하지 않았다.
+SQL은 기존 pglast8.7로51문·PLpgSQL3함수 및 SQL snapshot 본문을 파싱했다.
+실제 PostgreSQL 카탈로그/권한/RLS/다중 연결 경합/롤백·운영DB/Storage·FE/AI 통합은 미검증이다.
+파싱/모형 통과를 DB 작동 완료로 취급하지 않는다.
+
+운영 사전조회/적용 순서/005 제외/기존 데이터 보호/신규 테스트 계정/중단·복구는
+docs/DB_INTEGRATION_PREP_20261110.txt와 docs/sql/integration_preflight.sql,
+docs/sql/integration_verify.sql에 정리했다. Dashboard 검토용 단일 트랜잭션은
+../../local-tools/be-integration-prep/dashboard_review_only.sql이며 자동 실행하지 않았다.
+회원 과거 일기 소급·상품/가격/에셋·FE 지급 표시·실DB 검증/배포 승인은 남아 있다.
+이전770개/45문 검증은 구정책의 과거 결과이며 이번 최신 정책의 검증 수치는 위890개/51문이다.
+
+7. 파일·Git 보존
+
+이번 정책 수정은 room 서비스/클라이언트/DTO·config/env·main/diaries·보상 SQL/테스트/문서에 반영했다.
+기존 확정 API 회귀의 POST 횟수 검사는 확정 RPC 경로를 명시해 새 보상 호출과 구분한다.
+만화 SQL의 일기 SHARE 잠금 권한 보완은 만화 후보와 해당 정적 테스트에만 포함했다.
+기존 README/chat/세션 영속화/001~005/이메일 테스트/만화 실행코드·사용자 설정은 바이트 보존한다.
+기능별 파일/공유 hunk 분리안은 통합 준비 문서6번에 있다. 실제 스테이징/커밋은 하지 않았다.
+로컬 해시/전체XML/오프라인 차단/SQL 검토: ../../local-tools/be-integration-prep.
+AGENTS.md와 갱신한 PROJECT_STATUS.md는 계속 Git 제외다. 커밋/푸시/PR/병합/운영 적용/배포 없음.
