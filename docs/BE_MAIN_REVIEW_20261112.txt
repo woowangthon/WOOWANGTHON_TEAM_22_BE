@@ -1,0 +1,75 @@
+오늘,그리고 BE — main 병합 검토 기준
+2026-11-12 Asia/Seoul. base=main / compare=feat/be-bootstrap. 실제 병합은 사용자 검토 후 별도 진행.
+
+1. 구현과 기존 커밋
+
+시작 HEAD 32178bd, 원격 main b7a7f3d. 기존 38개 커밋과 사용자 작업을 보존한다.
+인증·회원 소유권, 이메일 테스트(4dbbb34), 보상(9bfd0c1), 상점(a00fc2e),
+방·배치(2d9d992), 나무·테마(c88bcd3), 수정(c8d2fb9), 만화 저장(f56aaad),
+삭제(6657e53), 환불(a6fff6f), 과거 일기 보상 보류 보완(691e5ff)은 이미 커밋됐다.
+이를 중복 구현/커밋하지 않고 미커밋 요청 복구·4컷 worker·runtime·SQL 자료를 목적별로 정리한다.
+
+요청 복구: 일기 수정/물주기 영수증 GET. 회원·요청 지문·버전을 검사한다.
+조회 실패나 미발견은 실패 확정/재전송 승인이 아니다. GET은 AI·업로드·업무 쓰기를 수행하지 않는다.
+4컷: 원문 확인 → comic-plans → 장면 확인 → comic-previews 202 → 원래 요청 ID GET → 일기 첨부.
+DB admit/claim, 300초 lease/claim token, 전송 전 dispatched, 자산 ID/해시 checkpoint를 사용한다.
+ready 컷을 재생성하지 않고 결과 불명은 unknown으로 보존한다. 만화 실패와 일반 일기 저장은 분리한다.
+
+2. 실행 진입점
+
+기본 app.main:app는 worker 비활성이다. SQL 설치만으로 이미지 생성이 켜지지 않는다.
+명시적 실행 진입점: app.runtime:create_runtime_app --factory.
+COMIC_WORKER_ENABLED=0 기본값, 1 명시 시에만 worker를 시작한다. 그 외 값은 시작 오류다.
+SESSION_STORE_MODE=memory를 요구하며, 활성화 시 DB 키/스키마 probe 실패는 시작을 중단한다.
+/health는 기존 생존 확인, /ready는 worker 준비 상태를 반환한다.
+이미 가동 중인 Render 설정은 변경하지 않는다. BE 저장소 병합과 별도 Render 배포는 다른 작업이다.
+
+3. 운영 SQL 보존 및 005 제외
+
+운영 적용 완료는 사용자 보고: 기존 001~004 → room → comic → v0.4 → comic jobs,
+06_verify_all 결과 확인 완료. 이번에는 실DB 재접속/SQL 실행/운영 재검증을 하지 않았다.
+정확한 수동 실행본은 docs/sql/dashboard_phase2_20261111에 보존한다.
+01_apply_room.sql, 02_apply_comic.sql, 03_apply_v04.sql, 04_apply_comic_jobs.sql은 최초 설치용이다.
+02b_preflight_v04.sql, 04_verify.sql, 06_verify_all.sql은 단계별 검증 SQL이다.
+00_export_diary_data.sql은 내보내기 도구이며 실제 백업/회원 데이터는 포함하지 않는다.
+03_v04_BLOCKED.sql은 과거 차단 근거이고 실행 대상이 아니다. 99_rollback_only.sql은 열린 트랜잭션 정리용이다.
+ZIP은 중복 로컬 묶음으로 Git에서 제외한다. SQL 본문은 변경하지 않고 당시 가드와 검증 절차를 보존한다.
+자동 실행 workflow/startup hook/Supabase CLI migration 연결을 추가하지 않는다.
+
+005는 supabase/candidates/session_persistence_v005.sql에 기존 후보를 유지한다.
+미추적 migrations/20261109000500_persist_chat_sessions.sql은 줄바꿈 외 동일한 중복이었다.
+원본 바이트를 supabase/candidates/local/ 아래로 옮겨 로컬에 보존하고 Git에서 제외한다.
+공유 migrations에는 기존001~004만 남는다. 로컬 config.toml도 커밋하지 않는다.
+PersistentSessionStore/SessionRepository 코드는 선택형 supabase 모드에서만 후보에 의존한다.
+comic jobs는 자체 DB 원장으로 복구하므로 005를 요구하지 않는다.
+005 적용/모드 전환은 별도 실DB 권한·경합·복구 검증과 사용자 결정이 필요하며 이번 병합의 전제가 아니다.
+
+4. 이번 검증
+
+BE .venv로 전체 회귀 1,068개 통과(실패/skip 0).
+기존 1,065개에 BE runtime 회귀 3개를 저장소 테스트로 편입했다.
+외부 네트워크·실제 .env 접근 차단, 차단된 접근 시도 0. Auth/DB/Storage/AI는 Fake/MockTransport.
+pytest AnyIO 재작성 경고 1개는 테스트 실패가 아니다.
+SQL18파일의 PostgreSQL/PLpgSQL 구문 검사 및 교체 RPC6개의 서명 보존 대조 통과.
+기존 pglast8.7을 BE .venv에서 재사용했으며 SQL을 실행하지 않았다.
+운영 DB 경합/권한/RLS, 실제 Storage 충돌, 실제 이미지 품질·비용·지연 검증으로 확대하지 않는다.
+
+Render c75a9bc의 BE app 파일45개는 줄바꿈 정규화 후 일치한다.
+나머지 app/config.py는 기존 기본 Supabase URL만 다르며 API/환경변수 계약은 같다.
+Render 실행 모듈 누락 없음. 실행 코드와 운영 환경변수는 이번에 변경하지 않는다.
+FE main 033965b80551e450d9dced07dd18adbaec45d238의 API 호출32곳 경로/메서드 누락0,
+comic-previews OpenAPI 202 응답 확인. 정적 계약 대조이며 브라우저 실서비스 테스트가 아니다.
+AI main 5242b50a192b644df80a0fcd280ca4fef0f7e080의 server.py/models.py/visual_models.py는
+Render c75a9bc와 Git blob이 동일하다. 생성 내부 구현 전체의 동일성이나 실모델 성공을 뜻하지 않는다.
+FE·AI·Render 원본 저장소는 읽기만 수행한다.
+
+5. 남은 제한
+
+- 미확정 대화·초안의 재시작 소실. FE는 did 없는 저장 전 만화 요청의 자동 복원을 보장하지 않는다.
+- 실PostgreSQL 다중 연결 claim/lease·rollback, 실제 Storage 재시작 복구는 별도 실증 필요.
+- Render 절전·Linux 부하·실모델 품질/한도는 이번 로컬 회귀로 검증되지 않는다.
+- 상품33개 등록 SQL과 개인 검증 자료는 local-tools에 보존된 별도 작업이다.
+  이번 작업에서 상품 등록 여부를 다시 조회하거나 등록 SQL을 실행하지 않는다.
+- GitHub 검토/CI 결과와 최종 커밋 SHA는 PR을 기준으로 확인한다. main 병합은 아직 수행하지 않는다.
+
+과거 날짜 문서는 구현 경위와 당시 검증 결과로 보존한다. 현재 상태는 본 문서를 우선한다.
