@@ -16,6 +16,15 @@ class ComicPreviewRequest(StrictModel):
     client_request_id: RequestKey
     history_revision: int = Field(ge=0)
     draft_id: str = Field(min_length=1, max_length=128)
+    input_confirmed: bool = False
+    scene_confirmed: bool = False
+    confirmed_plan: "VisualPlan | None" = None
+
+
+class ComicPlanRequest(StrictModel):
+    history_revision: int = Field(ge=0)
+    draft_id: str = Field(min_length=1, max_length=128)
+    input_confirmed: bool = False
 
 
 class ComicAttachRequest(StrictModel):

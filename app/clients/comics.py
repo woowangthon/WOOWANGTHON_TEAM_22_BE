@@ -1,6 +1,9 @@
+import asyncio
+from hashlib import sha256
 import json
 from uuid import UUID
 
+import httpx
 from pydantic import ValidationError
 
 from app.comic_schemas import StoredPreview
@@ -120,6 +123,29 @@ class ComicRepository:
 
     async def upload(self, preview, asset, image):
         await self.storage.upload(self.asset_row(preview, asset), image)
+
+    async def checkpoint_bytes(self, job, asset):
+        """기존 비공개 경로의 바이트만 읽는다. 404 이외 오류는 유실로 단정하지 않는다."""
+        writer = self.storage.writer
+        if writer is None:
+            raise AppError(503, 'COMIC_CHECKPOINT_UNAVAILABLE', '이미지 보관소 설정 필요')
+        path = '/storage/v1/object/diary-private/' + self.asset_row(job, asset)['storage_key']
+        try:
+            async with asyncio.timeout(self.storage.timeout_seconds):
+                async with writer.stream('GET', path) as response:
+                    if response.status_code == 404:
+                        return None
+                    response.raise_for_status()
+                    content = bytearray()
+                    async for part in response.aiter_bytes():
+                        content.extend(part)
+                        if len(content) > asset.byte_size:
+                            raise ValueError
+            if len(content) != asset.byte_size or sha256(content).hexdigest() != asset.sha256:
+                raise ValueError
+            return bytes(content)
+        except (httpx.HTTPError, TimeoutError, ValueError):
+            raise AppError(503, 'COMIC_CHECKPOINT_UNAVAILABLE', '이미지 체크포인트 확인 필요') from None
 
     async def sign(self, preview, asset, token):
         return await self.storage.signed_asset(self.asset_row(preview, asset), token)

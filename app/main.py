@@ -21,6 +21,9 @@ from app.clients.drawings import DrawingRepository
 from app.clients.sessions import SessionRepository
 from app.clients.room import RoomRepository
 from app.clients.comics import ComicRepository
+from app.clients.comic_ai import ComicAIClient
+from app.clients.comic_jobs import ComicJobRepository
+from app.services.comic_jobs import ComicJobService
 from app.config import Settings
 from app.errors import install_error_handlers
 from app.services.chat import ChatService
@@ -37,7 +40,8 @@ def create_app(settings: Settings | None = None,
                auth_transport: httpx.AsyncBaseTransport | None = None,
                db_transport: httpx.AsyncBaseTransport | None = None,
                storage_transport: httpx.AsyncBaseTransport | None = None,
-               session_repository: SessionRepository | None = None) -> FastAPI:
+               session_repository: SessionRepository | None = None,
+               enable_comic_worker: bool = False) -> FastAPI:
     settings = settings or Settings.from_env()
 
     @asynccontextmanager
@@ -111,8 +115,27 @@ def create_app(settings: Settings | None = None,
             app.state.request_recovery_service = RequestRecoveryService(
                 RequestRecoveryRepository(writer, settings.db_request_timeout_seconds), repository,
             )
-            app.state.comic_service = ComicService(store, ComicRepository(repository, repository.drawings))
-            yield
+            app.state.comic_service = ComicService(
+                store, ComicRepository(repository, repository.drawings),
+                ComicAIClient(http, settings.ai_request_timeout_seconds),
+            )
+            # 기본 app은 비활성. 명시적 활성화 및 시작 검사는 app.runtime factory에서 수행한다.
+            comic_http = await stack.enter_async_context(httpx.AsyncClient(
+                base_url=settings.ai_base_url,
+                timeout=httpx.Timeout(connect=3, read=200, write=10, pool=3),
+                transport=ai_transport or httpx.AsyncHTTPTransport(retries=0),
+                follow_redirects=False, trust_env=False,
+            ))
+            jobs = ComicJobService(app.state.comic_service,
+                                   ComicJobRepository(writer, settings.db_request_timeout_seconds),
+                                   ComicAIClient(comic_http, 210))
+            app.state.comic_service.jobs = jobs
+            if enable_comic_worker:
+                await jobs.start()
+            try:
+                yield
+            finally:
+                await jobs.stop()
 
     app = FastAPI(title="오늘,그리고 BE (잠정 API)", version="0.1.0", lifespan=lifespan)
     app.include_router(router)
