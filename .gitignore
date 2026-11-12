@@ -16,3 +16,13 @@ __pycache__/
 # 루트 README.md 외 Markdown은 로컬 전용으로 보관합니다.
 *.[mM][dD]
 !/README.md
+
+# 개인 검증 자료와 수동 배포용 묶음은 공유 소스에 포함하지 않습니다.
+/local-tools/
+*.dump
+*.backup
+/docs/sql/dashboard_phase2_20261111.zip
+
+# 로컬 CLI 설정과 005 원본 복사본. 공유 후보는 candidates/*.sql에 보존합니다.
+/supabase/config.toml
+/supabase/candidates/local/
