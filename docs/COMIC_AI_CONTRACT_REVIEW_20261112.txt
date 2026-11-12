@@ -1,0 +1,98 @@
+기존 4컷 계약 비교 / FE·AI 담당자 요청
+2026-11-12. 읽기 전용 비교이며 기존 BE 4컷 코드·Render를 수정하지 않았다.
+
+비교 고정점
+- BE feat/be-next@b7a4f4f6b1339dfd0f4a251f3befef6dd070ca29
+- AI main@5242b50a192b644df80a0fcd280ca4fef0f7e080
+- AI ai_cs@141894068ff93fc96010ec11640fa138cd8d8952
+- Render 로컬 배포 소스 c75a9bce01d60bd44bb6cd7d5466bd2b69d9698f
+AI 원격 두 HEAD는 요청 기준과 일치. 원본 refs를 갱신하지 않고 격리 저장소에서 확인.
+기존 /ready status=ok/comic_worker=true 확인 기록을 PROJECT_STATUS.md에 보존했다.
+이번에는 운영 /ready나 실행 SHA를 재조회하지 않았고 설정/배포도 바꾸지 않았다.
+
+항목별 결과
+
+1) 내부 경로와 확인 증거: 호환
+BE ComicAIClient는 이미 POST /api/visual-story, /api/visual-story/image를 호출한다.
+FE 원문 확인 → comic-plans → 장면 확인 → comic-previews(202) → 영속 worker
+→ Supabase 보관 → 원래 request ID GET → 일기 첨부 흐름을 유지한다.
+AI에는 confirmed=true, diary_text, image 요청의 diary_hash/source_ids/format을 전달한다.
+BE는 input_confirmed/scene_confirmed, 실제 초안 원문·해시·출처·장면 순서/근거를 검증한다.
+HTTP 스키마 models.py/visual_models.py는 main과 ai_cs 사이 변경이 없다.
+
+2) 버전·작업 식별자: 기존 BE의 책임
+BE 원장에 회원/세션/client_request_id/history_revision/draft_id/confirmed_plan/fingerprint 저장.
+같은 초안·수정본을 다른 키로 다시 생성하는 것도 DB 유니크 조건으로 막는다.
+AI에는 영속 작업 ID를 보내지 않으며 새 ai_cs도 이를 추가하지 않았다.
+첨부 당시 source_edit_version과 현재 일기 버전으로 stale/current를 구분한다.
+
+3) repeated/reuse_scene_id 및 컷 결과: 호환
+BE는 반복 장면의 원본 출처·캡션을 검사하고 고유 장면만 생성한다.
+반복 컷은 원본 자산을 참조한다. 성공 컷은 별도 보관되어 실패 컷 때문에 버리지 않는다.
+generated/rejected/failed/mock과 이미지 존재·mock 정합성을 검사한다.
+ai_cs는 rejected 안내문을 추가했지만 기존 VisualImage.error 선택 필드가 이미 받는다.
+ai_cs 내부 generate_comic_panel의 panel_count 추가는 AI 내부 변경이며 BE HTTP 변경 불필요.
+
+4) 전송 후 응답 유실·IMAGE_RESULT_UNKNOWN: 기존 BE 정책 유지
+AI는 timeout 또는 image_result_unknown 등에 HTTP502/503/504와
+detail.code=IMAGE_RESULT_UNKNOWN을 반환한다(main/ai_cs 모두).
+BE는 해당 5xx 및 네트워크 결과 불명을 COMIC_RESULT_UNKNOWN으로 다룬다.
+worker는 유료 호출 전에 dispatched, 보관 전에 asset/hash checkpoint를 기록한다.
+재시작 claim은 이미 dispatched된 컷을 다시 생성하지 않으며 바이트/Storage 복구만 시도한다.
+unknown을 확정 실패처럼 취급하거나 새 요청 키로 자동 재생성하지 않는다.
+
+5) 컷별 진행/재시도: 정책 차이, 자동 변경하지 않음
+BE GET은 원래 요청의 job_state/컷별 상태/recovery_required를 제공한다.
+retry_generation_allowed=false가 기존 계약이며 영속한 수동 재생성 API는 없다.
+ai_cs는 최초 고유 컷 시도가 끝난 뒤 rejected 컷만 15초 대기·남은 추정 예산 내 수동 재시도를
+지원하지만 이는 AI 메모리 캐시 안의 내부 능력이다. FE가 직접 AI를 호출할 권한은 아니다.
+요청에 따라 기존 BE 안전 정책을 유지했으며 신규 유료 재시도 계약을 임의 구현하지 않았다.
+
+6) AI 2,500 Neurons 추정 예산/5분 캐시: BE 영속 원장과 별개
+main: ComicImages에서 검토 불일치 시 한 컷 요청 내부 최대2회 이미지 시도.
+ai_cs: 한 컷 요청당 생성1회, 계획600/컷300 예약, 작업 추정 상한2500,
+계획 보완에 추가600 예약 및 고유 컷 첫 시도 예산 보전. 실제 청구액/계정 잔량 보장 아님.
+ai_cs는 성공·불명 결과를 프로세스 메모리에서 보관하며 5분 TTL/eviction/재시작 후 사라진다.
+여러 AI 프로세스가 공유하는 영속 예산/중복 방지 수단이 아니다.
+BE 원장을 캐시로 교체하거나 캐시 TTL 이후 유료 호출을 허용하지 않는다.
+
+7) Render 통합 시 발견된 실제 비호환 (운영 변경 전 해결 필요)
+Render c75a9bc runtime.py는
+  ProviderRouter(comic_image_attempts=1, cloudflare_http_attempts=1)
+을 사용하여 기존 main 기반 구현에서도 이미지 시도·공급자 HTTP 시도를1회로 제한한다.
+ai_cs providers.py의 생성자는 def __init__(self)이며 두 키워드를 받지 않는다.
+따라서 ai_cs를 Render AI 폴더에 그대로 덮으면 기존 factory가 TypeError로 시작 실패한다.
+또한 ai_cs _cloudflare_json은 range(2)로 5xx 시 HTTP 재시도를 허용한다.
+이는 현재 Render의 한 번 전송 정책과 다르다. ai_cs 이미지 생성1회라는 설명만으로
+네트워크 재시도에 따른 중복 유료 생성 방지가 충족된다고 볼 수 없다.
+이번에는 배포 범위가 아니므로 기존 runtime/worker를 바꾸거나 비활성화하지 않았다.
+
+검증
+- 실제 main/ai_cs 서버를 Mock 엔진으로 띄워 BE ComicAIClient의 장면/반복/이미지 mock,
+  IMAGE_RESULT_UNKNOWN 매핑을 검증: 각4개 통과(외부 호출 없음).
+- ai_cs 고민 테스트는 위4개 포함 총15개 통과.
+- 기존 BE 일기/4컷/worker 영향 범위191개 통과. 실Supabase/실이미지 생성은 수행하지 않았다.
+- constructor 비호환은 서명과 Render 호출부 대조로 확인했고 실제 Render를 실행/교체하지 않았다.
+
+담당자별 요청 (팀 결정 전 제안)
+
+FE
+1. WORRY_API_PROPOSAL_20261112.txt의 5개 세션 API+policy 경로 합의 및 구현.
+2. 저장 전 notice 표시/버전 확인, 시작키·client_message_id 보존, GET 복구,
+   expires_at 표시, finished/needs_adult 입력 중지, unavailable/unknown 분리.
+3. guardian 자동 열람/알림 UI를 만들지 말고 서버 권한·동의 절차가 준비될 때까지 비활성 유지.
+4. 기존 comic-previews/GET 복구 흐름과 retry_generation_allowed=false를 유지한다.
+
+AI
+1. 고민 기능의 기준 SHA를 ai_cs@1418940으로 합의. main에는 기능이 없으므로 현재 배포가
+   고민 API를 지원한다고 가정하지 않는다. 운영 승인 전 WORRY_ENABLE_MODEL=1 금지.
+2. Render 통합 후보에서 기존 factory 생성자 호환 및 cloudflare_http_attempts=1 보존 검증.
+   BE 4컷 계약 교체 없이 준비한다. 단순 전체 덮어쓰기로 배포하지 않는다.
+3. needs_adult/unavailable 고정 문구와 24개/8000자 한도, HTTP422의 일반 오류 외피 확인.
+4. 유료 rejected 재시도가 필요하다면 작업·컷·시도 ID, 예산 주체, 캐시 소실,
+   전송 결과 불명과 복구 정책을 BE/FE와 먼저 합의한다. 현재 공개 재시도는 비활성 유지.
+
+제품/운영
+7일 보관, 아동 자격·검증된 동의·철회, 안내문과 외부 AI 전달 범위, 권한 근거의 관리,
+보호자 공개 보류, 삭제 일정/감시 및 백업 보관 정책을 승인해야 한다.
+이번 로컬 코드가 이 정책의 승인이나 운영 배포를 대신하지 않는다.
