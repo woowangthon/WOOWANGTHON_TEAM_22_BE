@@ -7,6 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.chat import router
 from app.api.diaries import router as diary_router
 from app.api.edits import router as edit_router
+from app.api.request_recovery import router as request_recovery_router
+from app.clients.request_recovery import RequestRecoveryRepository
+from app.services.request_recovery import RequestRecoveryService
 from app.clients.edits import EditRepository
 from app.services.edits import EditService
 from app.api.room import router as room_router
@@ -105,6 +108,9 @@ def create_app(settings: Settings | None = None,
             app.state.diary_service = DiaryService(store, repository, app.state.room_service)
             app.state.drawing_service = DrawingService(repository.drawings)
             app.state.edit_service = EditService(EditRepository(repository), repository.drawings)
+            app.state.request_recovery_service = RequestRecoveryService(
+                RequestRecoveryRepository(writer, settings.db_request_timeout_seconds), repository,
+            )
             app.state.comic_service = ComicService(store, ComicRepository(repository, repository.drawings))
             yield
 
@@ -112,6 +118,7 @@ def create_app(settings: Settings | None = None,
     app.include_router(router)
     app.include_router(diary_router)
     app.include_router(edit_router)
+    app.include_router(request_recovery_router)
     app.include_router(room_router)
     app.include_router(comic_router)
     install_error_handlers(app)
