@@ -31,6 +31,8 @@ class ComicJobService:
         self.pending = None
         # 단일 실행기에서 마지막 생성 이미지 하나(정규화 최대10MiB)만 보존한다.
         self.bytes = None
+        # 확정 응답을 받은 뒤 DB 저장만 실패하면 생성 없이 같은 결과 저장을 재시도한다.
+        self.outcome = None
 
     @property
     def available(self):
@@ -58,6 +60,7 @@ class ComicJobService:
                 pass
         # DB의 dispatched/checkpoint 기록은 남긴다. 종료를 생성 실패 확정으로 바꾸지 않는다.
         self.bytes = None
+        self.outcome = None
 
     async def submit(self, owner, session, body):
         if not self.available:
@@ -132,16 +135,19 @@ class ComicJobService:
                             or self.pending.state != 'running'):
                         self.pending = None
                         self.bytes = None
+                        self.outcome = None
                 self.healthy = True
                 if self.pending:
                     await self.execute(self.pending)
                     self.pending = None
                     self.bytes = None
+                    self.outcome = None
             except AppError as error:
                 self.healthy = False
                 if error.code == 'COMIC_CLAIM_LOST':
                     self.pending = None
                     self.bytes = None
+                    self.outcome = None
                 # DB/업로드 재시도만 허용. 다음 순회는 영속 상태를 다시 읽고 dispatched를 재생성하지 않는다.
             except Exception:
                 self.healthy = False
@@ -154,6 +160,7 @@ class ComicJobService:
                 continue
             p = job.progress[scene.scene_id]
             cache_key = (job.preview_id, scene.scene_id)
+            outcome_key = (*cache_key, job.claim_token)
             image = self.bytes[1] if self.bytes and self.bytes[0] == cache_key else None
             if p.state == 'waiting':
                 if any(x.state == 'unknown' for x in job.progress.values()):
@@ -163,16 +170,25 @@ class ComicJobService:
                 try:
                     result = await self.ai.render(job.confirmed_plan, scene, scene_confirmed=True)
                     if result.status != 'generated':
-                        job = await self.repository.transition(job, 'outcome', scene_id=scene.scene_id, outcome=result.status)
-                        continue
-                    async with self.comics.decode_slots:
-                        image = await asyncio.to_thread(decode_comic_image, result.imageUrl)
-                    self.bytes = (cache_key, image)
-                except AppError:
-                    job = await self.repository.transition(job, 'outcome', scene_id=scene.scene_id, outcome='unknown')
-                    continue
+                        self.outcome = (outcome_key, result.status)
+                    else:
+                        async with self.comics.decode_slots:
+                            image = await asyncio.to_thread(decode_comic_image, result.imageUrl)
+                        self.bytes = (cache_key, image)
+                except AppError as error:
+                    # 요청 거절/연결 전 실패만 확정한다. 응답 유실·잘못된 응답은 unknown 유지.
+                    outcome = 'failed' if error.code in {
+                        'COMIC_AI_REJECTED', 'COMIC_AI_CONNECTION_FAILED',
+                    } else 'unknown'
+                    self.outcome = (outcome_key, outcome)
                 p = job.progress[scene.scene_id]
             if p.state == 'dispatched':
+                if self.outcome and self.outcome[0] == outcome_key:
+                    # DB 오류는 AI 오류 처리에 넣지 않는다. 다음 순회에서 DB 상태부터 재조회한다.
+                    job = await self.repository.transition(job, 'outcome', scene_id=scene.scene_id,
+                                                           outcome=self.outcome[1])
+                    self.outcome = None
+                    continue
                 if image is None:
                     job = await self.repository.transition(job, 'outcome', scene_id=scene.scene_id, outcome='unknown')
                     continue

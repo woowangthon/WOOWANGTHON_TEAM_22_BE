@@ -103,7 +103,7 @@ async def test_image_non_generated_is_preserved(status):
     (httpx.RemoteProtocolError("sensitive"), "COMIC_RESULT_UNKNOWN"),
     (httpx.Response(503, text="sensitive"), "COMIC_RESULT_UNKNOWN"),
     (httpx.Response(429, text="sensitive"), "COMIC_AI_REJECTED"),
-    (httpx.Response(302, headers={"location": "https://evil.invalid"}), "COMIC_AI_REJECTED"),
+    (httpx.Response(302, headers={"location": "https://evil.invalid"}), "COMIC_AI_BAD_RESPONSE"),
     (httpx.Response(200, text="not json"), "COMIC_AI_BAD_RESPONSE"),
 ])
 async def test_no_automatic_retry_after_ai_error(outcome, code):

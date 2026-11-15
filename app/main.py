@@ -160,7 +160,7 @@ def create_app(settings: Settings | None = None,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Content-Type", "Authorization", "Idempotency-Key", "If-Match", "X-Request-ID"],
-        expose_headers=["X-Request-ID"],
+        expose_headers=["X-Request-ID", "Retry-After"],
     )
 
     @app.get("/health")

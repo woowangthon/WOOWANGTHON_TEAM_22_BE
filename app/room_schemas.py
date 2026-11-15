@@ -49,6 +49,7 @@ class Tree(StrictModel):
     max_stage: Literal[7]
     days_watered: int = Field(ge=0, le=7)
     watered_today: bool
+    daily_water_limit_exempt: bool = False
     asset_key: AssetKey
 
     @model_validator(mode="after")

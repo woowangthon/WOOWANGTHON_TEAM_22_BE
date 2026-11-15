@@ -8,8 +8,7 @@ from app.errors import AppError
 from app.worry_schemas import WorrySession, WorrySummary
 
 ERRORS = {
-    "WORRY_ACCESS_REQUIRED": (403, "서버에서 확인한 이용 권한과 동의가 필요해요."),
-    "WORRY_NOTICE_REQUIRED": (409, "보관 기간과 열람 안내를 확인해 주세요."),
+    "WORRY_MEMBER_REQUIRED": (403, "로그인한 정상 회원만 이용할 수 있어요."),
     "WORRY_NOT_FOUND": (404, "대화를 찾을 수 없어요."),
     "WORRY_FINISHED": (409, "종료된 대화예요. 새 대화를 시작해 주세요."),
     "WORRY_HISTORY_LIMIT": (409, "대화 한도에 도달했어요. 종료하거나 새 대화를 시작해 주세요."),
@@ -19,7 +18,7 @@ ERRORS = {
 
 
 class WorryRepository:
-    """회원 소유권·만료·동의와 원장 전이는 서버 전용 원자적 RPC에서 재검사한다."""
+    """AuthClient가 검증한 회원 UUID를 전달하고 RPC에서 소유권·만료·원장 전이를 검사한다."""
     def __init__(self, writer, timeout):
         self.http, self.timeout = writer, timeout
 

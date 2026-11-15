@@ -65,7 +65,8 @@ class AIClient:
 
         # 리다이렉트·AI 오류 본문은 전달하거나 따라가지 않습니다.
         if response.status_code in {429, 503}:
-            raise AppError(503, "AI_UNAVAILABLE", "AI 서버가 요청을 처리하지 못했어요.")
+            raise AppError(503, "AI_UNAVAILABLE", "AI 서버가 요청을 처리하지 못했어요.",
+                           retry_after=response.headers.get("Retry-After"))
         if 400 <= response.status_code < 500:
             raise AppError(502, "AI_REQUEST_REJECTED", "AI 서버와 요청 계약을 확인해야 해요.")
         if response.status_code != 200:

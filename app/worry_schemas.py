@@ -15,7 +15,8 @@ AIStatus = Literal["opening", "reply", "needs_adult", "unavailable", "finished"]
 
 
 class WorryStart(StrictModel):
-    notice_version: Literal["worry-v1-proposal"]
+    # 이전 FE 요청 호환용. 동의 증빙으로 사용하지 않으며 서버가 안내 버전을 기록한다.
+    notice_version: str | None = Field(default=None, max_length=128)
 
 
 class WorryMessageRequest(MessageRequest):
