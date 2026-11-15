@@ -76,10 +76,12 @@ class ComicAIClient:
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 async with self.http.stream("POST", path, json=payload) as response:
-                    if response.status_code >= 500:
+                    if response.status_code >= 500 or response.status_code in {408, 499}:
                         raise AppError(502, "COMIC_RESULT_UNKNOWN", "생성 결과 확인 필요")
-                    if response.status_code != 200:
+                    if 400 <= response.status_code < 500:
                         raise AppError(502, "COMIC_AI_REJECTED", "시각화 요청 처리 실패")
+                    if response.status_code != 200:
+                        raise AppError(502, "COMIC_AI_BAD_RESPONSE", "시각화 응답 상태 확인 필요")
                     content = bytearray()
                     async for chunk in response.aiter_bytes():
                         content.extend(chunk)
