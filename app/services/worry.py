@@ -14,8 +14,7 @@ class WorryService:
 
     async def start(self, owner, key, body):
         self.require_enabled()
-        result = await self.repository.command(owner, "start", key=key,
-                                               notice_version=body.notice_version)
+        result = await self.repository.command(owner, "start", key=key)
         return await self._execute(owner, result)
 
     async def send(self, owner, session_id, body):

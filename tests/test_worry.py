@@ -14,7 +14,10 @@ async def test_default_disabled_policy_and_auth(api_factory):
         r = await client.get('/api/worry/policy')
         assert r.status_code == 200 and r.json()['guardian_access'] is False
         assert r.json()['enabled'] is False and r.json()['retention_days'] == 7
-        r = await client.post('/api/worry/sessions', json={'notice_version':'worry-v1-proposal'},
+        assert r.json()['authentication_required'] is True
+        assert r.json()['server_authorization_required'] is False
+        assert r.json()['consent_required'] is False
+        r = await client.post('/api/worry/sessions', json={},
                               headers={'Idempotency-Key':'open-1'})
         assert r.status_code == 503 and r.json()['error']['code'] == 'WORRY_NOT_ENABLED'
         assert not ai.requests

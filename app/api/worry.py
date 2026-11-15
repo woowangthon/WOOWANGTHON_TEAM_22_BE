@@ -15,7 +15,8 @@ router = APIRouter(prefix="/api/worry", tags=["worry (제안 계약)"])
 async def policy(request: Request, member_id: MemberId):
     return {"notice_version": NOTICE_VERSION, "notice": NOTICE, "retention_days": 7,
             "guardian_access": False, "enabled": request.app.state.worry_service.enabled,
-            "server_authorization_required": True}
+            "authentication_required": True, "server_authorization_required": False,
+            "consent_required": False}
 
 
 @router.post("/sessions", response_model=WorrySession, status_code=201)
