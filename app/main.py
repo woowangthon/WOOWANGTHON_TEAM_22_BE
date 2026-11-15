@@ -33,6 +33,10 @@ from app.services.room import RoomService
 from app.services.comics import ComicService
 from app.session_store import SessionStore
 from app.persistent_session_store import PersistentSessionStore
+from app.api.worry import router as worry_router
+from app.clients.worry import WorryRepository
+from app.clients.worry_ai import WorryAIClient
+from app.services.worry import WorryService
 
 
 def create_app(settings: Settings | None = None,
@@ -93,6 +97,10 @@ def create_app(settings: Settings | None = None,
             app.state.chat_service = ChatService(
                 store, AIClient(http, settings.ai_request_timeout_seconds),
             )
+            app.state.worry_service = WorryService(
+                WorryRepository(writer, settings.db_request_timeout_seconds),
+                WorryAIClient(http), settings.worry_enabled,
+            )
             repository = DiaryRepository(reader, writer, settings.db_request_timeout_seconds)
             storage_clients = [reader, writer]
             if storage_transport is not None:
@@ -144,6 +152,7 @@ def create_app(settings: Settings | None = None,
     app.include_router(request_recovery_router)
     app.include_router(room_router)
     app.include_router(comic_router)
+    app.include_router(worry_router)
     install_error_handlers(app)
     app.add_middleware(
         CORSMiddleware,

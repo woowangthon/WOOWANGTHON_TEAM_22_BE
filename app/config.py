@@ -24,6 +24,7 @@ class Settings(BaseModel):
     supabase_secret_key: SecretStr | None = None
     db_request_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
     session_store_mode: Literal["memory", "supabase"] = "memory"
+    worry_enabled: bool = False
 
     @field_validator("supabase_secret_key")
     @classmethod

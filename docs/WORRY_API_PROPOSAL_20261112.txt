@@ -1,0 +1,205 @@
+우냥이 고민 대화 — BE 로컬 구현 / 신규 제안 계약
+2026-11-12 Asia/Seoul. feat/be-next, 시작 HEAD b7a4f4f6b1339dfd0f4a251f3befef6dd070ca29.
+FE 합의·운영 적용 전이다. 기존 일기/4컷 API는 확정 계약 그대로 유지한다.
+
+1. 버전과 범위
+
+- 원격 읽기 전용 ls-remote 결과:
+  AI main = 5242b50a192b644df80a0fcd280ca4fef0f7e080
+  AI ai_cs = 141894068ff93fc96010ec11640fa138cd8d8952
+  지정 SHA와 일치. 별도 local-tools/worry-contract-20261112/ai에 객체를 fetch했다.
+  고민 API가 있는 ai_cs 전체 소스를 단일 기준으로 사용했다. main에는 고민 API가 없다.
+- AI/FE 원본 checkout/reset/merge/수정 없음. Render c75a9bc 변경/배포 없음.
+  로컬 FE HEAD는 fee8a5d7(요청의 직전 확인 033965b 이후 상태); FE 원격 재조회·수정은 하지 않았다.
+- 신규 경로/notice_version/오류·보관·종료 규칙은 모두 FE와 합의할 제안이다.
+- 기본 WORRY_ENABLED=false. SESSION_STORE_MODE=memory와 기존 comic worker 설정 유지.
+  고민 저장소는 전용 Supabase RPC이며 일기 메모리 세션/005와 무관하다.
+
+2. 인증·이용 안내·권한
+
+모든 경로는 기존 Authorization: Bearer <회원 access token>을 요구한다.
+Supabase Auth에서 비익명 authenticated 회원을 검증한다. 타회원 ID를 요청에서 받지 않는다.
+기존 코드에는 아동 계정 판별, 보호자 관계, 민감 기록 동의·열람 권한이 없었다.
+
+GET /api/worry/policy (200)
+{
+  "notice_version":"worry-v1-proposal",
+  "notice":"대화는 시작한 때부터 7일간 보관한 뒤 삭제해요. 로그인한 본인만 볼 수 있어요. 보호자에게 자동으로 알리거나 대화를 공유하지 않아요. 답변을 위해 대화 내용이 AI 서비스에 전달돼요. 이름이나 연락처는 적지 않아도 돼요.",
+  "retention_days":7,"guardian_access":false,"enabled":false,
+  "server_authorization_required":true
+}
+
+enabled는 서버 기능 설정이며 해당 사용자의 권한 승인을 뜻하지 않는다.
+FE는 저장 전 이 안내를 표시하고 확인한 버전을 start에 전송한다.
+Boolean consent만으로는 저장할 수 없다. 추가 필드는 422로 거부한다.
+
+최소 서버 경계: worry_access_grants의 검증된 아동 이용 자격, 동의 확인 시각,
+동의 버전, 유효 기한, 철회 시각, 외부 검증 evidence_ref를 모든 RPC에서 검사한다.
+service_role도 이 테이블에는 SELECT만 가능하며 FE용 생성/변경 API는 없다.
+승인된 운영자 절차가 검증 근거를 관리해야 한다. 실제 아동 자격·보호자 동의를
+수집/확인하는 완성된 제품 흐름은 이번에 구현하지 않았다. 정책 승인 전 grant를 만들지 않는다.
+권한 만료·철회 후 조회/추가/종료 모두 403. 서버 정리 작업은 계속 수행할 수 있다.
+보호자용 조회·자동 알림·공유 기능은 없다. needs_adult도 공개 권한을 부여하지 않는다.
+
+3. 세션 시작 및 공통 응답
+
+POST /api/worry/sessions (201)
+Idempotency-Key: <1~128자 A-Z a-z 0-9 _ ->
+{"notice_version":"worry-v1-proposal"}
+
+응답 예시(합성):
+{
+  "id":"11111111-1111-4111-8111-111111111111",
+  "state":"active",
+  "created_at":"2026-11-12T12:00:00Z",
+  "expires_at":"2026-11-19T12:00:00Z",
+  "last_ai_status":"opening",
+  "messages":[{
+    "session_id":"11111111-1111-4111-8111-111111111111",
+    "position":0,"role":"assistant","text":"합성 첫 인사",
+    "created_at":"2026-11-12T12:00:01Z"
+  }],
+  "requests":[{
+    "id":"22222222-2222-4222-8222-222222222222",
+    "kind":"opening","client_message_id":null,"status":"completed",
+    "error_code":null,"mock":true,"created_at":"2026-11-12T12:00:00Z"
+  }]
+}
+
+id는 서버 UUID, 메시지 식별자는 (session_id, position), position은 0부터 증가한다.
+created_at/expires_at는 서버 DB timestamptz. ISO 8601 오프셋을 파싱하고 FE에서 KST로 표시한다.
+expires_at는 created_at+168시간으로 고정. 조회/대화로 연장하지 않는다.
+같은 시작 키 재요청은 동일 세션의 최신 snapshot을 반환하며 AI를 다시 호출하지 않는다.
+다른 시작 키는 기존 active 세션을 원자적으로 종료하고 새 세션을 만든다.
+동시 시작도 회원별 DB advisory lock + active 부분 유니크 인덱스로 하나만 active다.
+이전 진행 중 원장은 unknown 처리하고 뒤늦은 응답이 세션을 재개하지 못한다.
+세션/키의 중복 방지는 보관된 기록에 한정한다. 삭제 후 키 재사용을 막는 영구 원장은 없다.
+FE는 매 새 대화에 새 UUID 키를 만들고 네트워크 재시도에는 원래 키를 사용한다.
+
+4. 메시지·조회·종료
+
+POST /api/worry/sessions/{UUID}/messages (200)
+{"text":"합성 아이 입력","client_message_id":"message_550e8400_e29b"}
+추가 assistant 이력, 회원 ID, 보호자 ID는 받지 않는다. text는 공백뿐일 수 없고 1~2,000자.
+같은 ID/같은 원문은 기존 최신 snapshot 반환, 다른 원문은 409 IDEMPOTENCY_CONFLICT.
+성공/AI 실패 모두 공통 세션 응답. 접수된 child 원문을 보존하고 원장 상태를 함께 반환한다.
+
+GET /api/worry/sessions/{UUID} (200): 공통 세션 상세, AI 호출/업무 쓰기 없음.
+GET /api/worry/sessions?limit=50&offset=0 (200):
+{"sessions":[{"id":"...","state":"finished","created_at":"...","expires_at":"...","last_ai_status":"reply"}],"limit":50,"offset":0}
+목록은 본인·미만료·child 발언이 있는 세션만 최신순(created_at,id 내림차순).
+limit 1~100, offset 0~10000. 목록에는 원문/요청 원장을 포함하지 않는다.
+첫 인사만 있거나 실패하여 발언이 없는 세션은 제외. 진행 중 세션도 child가 있으면 포함한다.
+새 세션 생성과 겹친 페이지 이동은 offset 방식 특성상 중복될 수 있어 FE는 id로 중복 표시를 막는다.
+
+POST /api/worry/sessions/{UUID}/finish (200, 본문 불필요)
+반복 호출 안전. AI 호출 없음. state=finished로 변경하고 진행 중 요청은 unknown으로 닫는다.
+last_ai_status는 실제 마지막 AI 응답이며 수동 finish로 임의 덮어쓰지 않는다.
+종료 후 신규 메시지 409. 기존 client_message_id 조회 성격의 동일 재요청은 snapshot 반환 가능.
+
+5. AI 상태와 복구
+
+AI POST /api/worry/chat에는 {"messages":[]} 또는 DB에 보관한 role/text 배열만 보낸다.
+회원·세션·요청 ID와 동의 근거를 보내지 않는다. 최대 24개/총 8,000자/개별 2,000자,
+마지막 child 규칙을 DB와 클라이언트에서 검사한다. 과거 이력은 자르거나 요약하지 않는다.
+한도에 맞는 요청의 응답은 보존하므로 최종 저장 메시지는 25개 또는 8,000자를 넘을 수 있다.
+그 다음 child 접수는 409 WORRY_HISTORY_LIMIT이며 접수/AI 호출 없이 새 대화 또는 종료를 안내한다.
+
+last_ai_status:
+- opening/reply: 일반 진행.
+- needs_adult: state=finished, AI가 제공한 검토된 안내를 표시하고 일반 입력 중단.
+  ai_cs의 ADULT_RESPONSE는 가까운 안전한 어른, 집에서 말하기 어려우면 선생님/다른 신뢰하는
+  어른에게 알리도록 안내한다. 이 문구의 제품 승인은 팀 결정이며 자동 공유는 없다.
+- finished: AI가 종료 의사를 확인했으므로 state=finished.
+- unavailable: 정상 reply와 구분한다. 요청 상태도 unavailable. 종료/새 대화를 안내한다.
+- null: 아직 유효한 AI 응답을 받지 못함. requests 상태를 확인한다.
+HTTP/전송 오류에는 last_ai_status가 이전 값으로 남으므로 반드시 마지막 requests도 확인한다.
+
+requests.status:
+- accepted: child/opening 접수 저장 완료, 전송 전.
+- dispatched: 전송 허가 원장 저장 완료. 실제 모델 호출이 발생했음을 보장하지 않는다.
+- completed: AI 응답 및 assistant 저장 완료.
+- unavailable: AI unavailable 또는 연결 전 실패(WORRY_AI_NOT_SENT).
+- rejected: AI HTTP422 계약 거부(WORRY_AI_REJECTED).
+- unknown: 타임아웃·잘못된 응답·결과 미확인·진행 중 종료 등(WORRY_AI_OUTCOME_UNKNOWN).
+accepted/dispatched는 60초 deadline 이후 GET에서 unknown으로 표시한다(읽기 중 DB 변경 없음).
+BE AI 대기 상한은 30초. 취소·재시작 후에도 원장은 남으며 자동 재호출하지 않는다.
+개별 요청 mock=null은 유효한 AI 응답이 없다는 뜻이다.
+
+FE 네트워크 응답 유실: 원래 session UUID로 GET, 또는 동일 키·동일 본문으로 POST한다.
+시작 UUID를 받지 못했다면 원래 Idempotency-Key로 시작을 다시 조회한다.
+accepted/dispatched 동안 GET으로 상태를 확인한다. unknown/unavailable/rejected에서 자동 재전송,
+새 메시지 키로 우회, 새 대화 자동 생성 금지. 이용자가 종료/새 대화를 선택하도록 한다.
+응답이 확정된 기록도 재요청은 최신 세션 snapshot이므로 FE는 position으로 병합한다.
+외부 모델의 exactly-once 보장이 아니다. admission/dispatch DB 응답 유실이면 모델 호출이
+0회일 수 있고 결과가 불명인 경우 재호출을 포기한다. 새 세션으로 같은 문장을 다시 쓰는 것은
+별개 사용자 요청이다. DB 접수 자체가 실패한 동일 키 요청은 정상적으로 새 접수될 수 있다.
+
+6. HTTP 오류 외피
+
+{"error":{"code":"WORRY_HISTORY_LIMIT","message":"대화 한도에 도달했어요. 종료하거나 새 대화를 시작해 주세요.","retryable":false},"request_id":"req_..."}
+공통 X-Request-ID 및 Cache-Control:no-store 적용. 원문·AI 원본 오류는 반환/로그하지 않는다.
+
+401 AUTHENTICATION_FAILED: 인증 없음/무효.
+403 ACCESS_DENIED: 기존 인증 정책 거부.
+403 WORRY_ACCESS_REQUIRED: 서버 자격/동의 없음·만료·철회.
+404 WORRY_NOT_FOUND: 타회원/미존재/만료 공통(존재 여부 숨김).
+409 WORRY_NOTICE_REQUIRED: 서버 notice 버전 불일치(HTTP body의 미지원 버전은 422).
+409 WORRY_FINISHED / WORRY_HISTORY_LIMIT / WORRY_RECOVERY_REQUIRED / IDEMPOTENCY_CONFLICT.
+422 VALIDATION_ERROR: 잘못된 UUID/키/본문/추가 필드/공백/2,000자 초과/NUL 등.
+502 WORRY_STORE_INVALID: DB 응답 계약 오류.
+503 WORRY_NOT_ENABLED / WORRY_STORE_UNAVAILABLE: 기능 또는 저장소 미준비·접수/저장 결과 확인 필요.
+기존 AUTH_NOT_CONFIGURED/AUTH_UNAVAILABLE 등 인증 오류도 그대로 적용된다.
+AI 오류가 안전하게 원장에 저장된 경우 HTTP200(시작은201)이며 requests.error_code로 구분한다.
+이때 HTTP 성공을 AI 답변 성공으로 해석하면 안 된다. DB 완료 응답도 유실되면 503 뒤 GET 복구.
+
+7. DB 및 운영 준비
+
+후보: supabase/candidates/worry_conversations_v1.sql
+테이블4(worry_access_grants/sessions/messages/requests), 함수3(snapshot/command/purge).
+RLS를 켜고 anon/authenticated 직접 SELECT/쓰기/RPC 실행을 모두 철회한다.
+service_role RPC는 owner+유효 동의+만료를 재검사. 보호자 우회 정책 없음.
+만료 세션 삭제 시 메시지/원장만 cascade. 다른 일기·만화·회원 행 삭제 없음.
+SQL은 자동 migrations에 넣지 않았다. 001~004/기존 운영 SQL/005는 변경·실행하지 않았다.
+환경값은 예시만 추가했고 실제 .env/배포 설정은 읽거나 바꾸지 않았다.
+
+DB 스케줄러: 저장소에 pg_cron 구성/기존 고민 정리 수단 없음.
+이번에는 운영 DB에 연결하지 않아 운영 확장 설치·권한·일정 유무는 미확인이다.
+docs/sql/worry_preflight_readonly.sql로 관리자가 읽기 전용 확인 후 아래 중 선택한다.
+
+A. pg_cron이 이미 승인되어 사용 가능할 때(자동 실행하지 않은 등록 예시):
+select cron.schedule('worry-expiry-hourly','7 * * * *',
+  $$select public.purge_expired_worry_sessions(1000);$$);
+먼저 cron.job에서 같은 jobname 확인. 중복 등록하지 말고 기존 일정을 검토한다.
+이 함수는 1회 최대10,000개, 기본1,000개를 SKIP LOCKED로 삭제하고 삭제 건수를 반환한다.
+매시간 성공 여부/만료 적체 건수를 감시하고 적체 시 제한된 횟수로 반복 실행한다.
+
+B. pg_cron이 없으면 외부 스케줄러가 서버 전용 credential로
+POST <SUPABASE_URL>/rest/v1/rpc/purge_expired_worry_sessions {"p_limit":1000}
+실행. 키는 secret manager에만 보관하고 FE·AI·저장소·로그에 남기지 않는다.
+DB 독립 실행이므로 Render 절전과 무관. BE lifespan 타이머에만 의존하지 않는다.
+스케줄러 장애로 삭제가 늦어져도 목록/상세/추가/finish는 만료 순간부터 차단된다.
+기존 백업/PITR의 보관 기간은 별도 정책 결정 대상이며 이번에 변경·삭제하지 않았다.
+
+운영 순서(이번 미수행): 정책·아동 자격/동의 검증·AI 안내 승인 → 격리 DB 및 Supabase
+staging 역할 검증 → 후보 SQL 별도 승인/적용 → 정리 일정/감시 확인 → 검증된 권한 근거 등록
+→ FE 제안 계약 연동 → 승인된 AI 버전 배포 준비 → WORRY_ENABLED 활성화 및 합성 E2E.
+실모델 WORRY_ENABLE_MODEL=1은 별도 운영 승인 이후 AI 담당자가 결정한다.
+AI_MODE=mock인 격리 환경부터 확인하고 운영 아동 데이터를 시험 입력으로 사용하지 않는다.
+
+8. 검증과 한계
+
+BE .venv로 고민 테스트 50개 통과: 22개 Mock/입력·클라이언트,
+28개 실제 로컬 PostgreSQL17.11 기반 API/SQL 검증. AI/Auth는 MockTransport.
+새 Python 프로세스 GET, 다른 프로세스 DB 연결, 회원별 동시 요청, 실제 RLS/권한 거부,
+AI/DB 응답 유실 전후, 7일 경계 전후·진행 중 만료, 지연/반복 purge, 정확한 8,000자,
+24개 메시지, 동의 철회/만료/미래 시각, needs_adult/보호자 차단을 검증했다.
+기존 일기/4컷/worker 영향 범위 191개 통과(초기 고민 Mock21개 포함).
+AI ai_cs 실제 소스 Mock 계약15개, main 4컷 계약4개 통과. 외부 모델 호출0.
+AI deps는 기존 AI venv의 라이브러리를 읽기만 했고 실행 Python은 BE .venv다.
+근거: ../local-tools/worry-contract-20261112/의 pg.xml, regression.xml, ai-contract.xml,
+ai-main-contract.xml 및 실행 스크립트. 해당 경로는 개인 로컬 검증 자료이다.
+실제 Supabase PostgREST/Auth/JWT/운영 RLS·스케줄러·Render절전·실모델 품질/지연/비용,
+브라우저 FE 및 실제 자격/동의 검증 절차는 미검증. 전체 기존 테스트는 재실행하지 않았다.
+
+4컷 비교 및 담당자 요청은 COMIC_AI_CONTRACT_REVIEW_20261112.txt 참조.
