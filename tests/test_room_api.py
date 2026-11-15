@@ -59,7 +59,7 @@ async def test_empty_room_and_shop_are_readable_without_seeding_products_or_rewa
             "as_of_date": "2026-11-10", "wallet": {"coins": 0, "water_drops": 0},
             "room": {"width": 1440, "height": 900, "theme": {"item_id": None,
                 "background_asset_key": "room_default", "diary_cover_asset_key": "cover_default"}},
-            "tree": {"stage": 0, "max_stage": 7, "days_watered": 0, "watered_today": False, "asset_key": BASE_TREE[0]},
+            "tree": {"stage": 0, "max_stage": 7, "days_watered": 0, "watered_today": False, "daily_water_limit_exempt": False, "asset_key": BASE_TREE[0]},
             "inventory": [],
         }
         assert (await client.get("/api/shop/items")).json() == {"items": []}
@@ -242,7 +242,7 @@ async def test_water_once_per_seoul_day_cumulative_nonconsecutive_seven_and_full
             first = await client.post("/api/me/tree/water", json=request)
             assert first.status_code == 200
             assert first.json()["tree"] == {"stage": stage, "max_stage": 7, "days_watered": stage,
-                "watered_today": True, "asset_key": "test/snow/adult" if stage == 7 else BASE_TREE[stage]}
+                "watered_today": True, "daily_water_limit_exempt": False, "asset_key": "test/snow/adult" if stage == 7 else BASE_TREE[stage]}
             assert first.json()["wallet"]["water_drops"] == 10 - stage
             assert (await client.post("/api/me/tree/water", json=request)).json() == first.json()
             assert_error(await client.post("/api/me/tree/water", json={"client_request_id": "extra"}),
