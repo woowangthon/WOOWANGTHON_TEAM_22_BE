@@ -1,0 +1,61 @@
+우냥이 현재 계약과 제출 DB 재현 자료
+2026-11-15. 코드 비교 기준: today-and-near-render@954ddc7ccafab2d012288cdbab341a144a183e18.
+Render 실제 실행 SHA와 운영 DB 정의는 이번 작업에서 직접 확인하지 않았다.
+기존 정상 회원 v2·7일 만료 Cron 적용은 사용자 보고이며 운영 SQL을 재실행하지 않았다.
+
+1. 현재 요청 계약
+
+WORRY_ENABLED=true인 BE에서 인증된 비익명 회원은 다음 요청으로 시작한다.
+POST /api/worry/sessions, Authorization: Bearer <회원 토큰>, Idempotency-Key, JSON {}.
+이전 notice_version 필드는 최대128자 또는 null로 호환하지만 권한·동의 판단에 쓰지 않는다.
+GET /api/worry/policy는 authentication_required=true, server_authorization_required=false,
+consent_required=false를 반환한다. 안내문·7일 보관·guardian_access=false는 유지한다.
+회원 확인은 매 요청 AuthClient /auth/v1/user 응답으로 수행하고 검증 UUID만 RPC에 전달한다.
+SQL은 NULL/0 UUID를 거부하며 회원 외래키, 소유권, 만료, 원장 상태 전이를 검사한다.
+서버 역할은 신뢰 경계다. 브라우저의 owner 또는 서비스 키로 직접 RPC를 호출하지 않는다.
+
+목록과 상세 GET은 저장된 상담을 조회한다. active 상담은 같은 ID에 메시지를 보내 이어쓰며
+expires_at을 연장하지 않는다. finished·만료·다른 회원 상담은 재개할 수 없다.
+AI 응답 유실은 unknown으로 보존하고 자동으로 같은 발화를 다시 생성하지 않는다.
+
+2. 별도 개발 DB의 재현 순서
+
+이미 설치한 운영 DB에 아래 순서를 반복하지 않는다. 제출 자료는 자동 migration이 아니다.
+빈 개발 Supabase의 Auth 기본 구조와 서버 역할/pg_cron이 준비된 상태를 전제로 한다.
+
+가. supabase/candidates/worry_conversations_v1.sql로 테이블·함수·RLS·ACL을 설치한다.
+나. docs/sql/worry_open_access_patch_20261113_v2.sql의 사전 점검과 증분 함수를 적용한다.
+    기존 함수를 해시로 확인한 뒤 하나의 트랜잭션에서 교체하며 낯선 정의/권한이면 중단한다.
+    최종 worry_command 함수 본문 MD5: 21a2f59d82ed3537e7229e851aafcb44.
+    이 SQL은 cron.job을 조회하므로 pg_cron 카탈로그가 먼저 필요하다.
+    auth.users SELECT 권한은 필요 없고 새로 부여하지 않는다.
+다. 만료 삭제를 재현할 환경에서만 supabase/candidates/worry_expiry_schedule_v1.sql을 검토한다.
+    기존 일정이 다르면 덮어쓰지 않고 중단한다. 매분 최대 1000세션 정리 후보이다.
+라. docs/sql/worry_preflight_readonly.sql 및 worry_expiry_monitor_readonly.sql로 상태를 확인한다.
+    만료 즉시 API 접근이 차단되어도 실제 삭제는 Cron 실행/적체에 따라 늦어질 수 있다.
+
+기존 worry_access_grants 테이블은 자료 보존을 위해 남지만 정상 회원 이용 판단에는 쓰지 않는다.
+초기 v1 회원 검사는 최종 v2가 대체한다. 최종 계약의 재현에는 가·나가 모두 필요하다.
+이전 auth.users SELECT 의존 패치, 계정 grant 등록, 심사 계정 재화/초기화 SQL은 필요하지 않다.
+session_persistence_v005.sql은 일기 세션의 별도 후보이며 우냥이 재현 조건이 아니다.
+
+docs/sql/worry_open_access_rollback_20261113_v2.sql은 저장된 기존 함수로 되돌리는 자료이다.
+복구는 예전 승인/auth.users SELECT 의존성을 되살리므로 정상 서비스 복구를 보장하지 않는다.
+운영 환경에 자동 연결하거나 적용하지 않는다.
+
+3. 로컬 검증 범위
+
+tests/test_worry.py는 요청/오류 계약, tests/test_worry_postgres.py는 정상 회원 시작·목록·상세,
+새 앱 이어쓰기·소유권·종료·168시간 만료·중복/응답 유실을 검증한다.
+tests/test_worry_permission_patch.py는 실제 격리 PostgreSQL에서 v2 반복·복구·권한/함수 변조
+거부·트랜잭션 원복을 검사한다. 합성 로컬 DB worry_contract_test만 지원한다.
+WORRY_TEST_PG_ROOT에 PostgreSQL 바이너리 루트, WORRY_TEST_PG_PORT에 54679 또는 54680을
+명시하지 않으면 PostgreSQL 검증은 건너뛴다. BE .venv에서 pytest로 실행한다.
+Auth/AI/PostgREST HTTP는 대역이며 실제 Supabase 인증·모델 호출·Cron tick 증거가 아니다.
+
+4. 배포와 일반 소스의 경계
+
+SUPABASE_URL/키, ALLOWED_ORIGINS, WORRY_ENABLED, AI 주소 등은 실행 환경에서 주입한다.
+Render supervisor/운영 환경파일은 이 저장소로 복사하지 않는다.
+daily_water_limit_exempt는 운영 DB가 명시한 한정 계정 응답을 전달하는 기존 배포 필드이며
+기본값은 false다. 일반 회원 물주기 제한·재화 로직이나 운영 계정을 바꾸지 않는다.
