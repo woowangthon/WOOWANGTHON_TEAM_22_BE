@@ -1,4 +1,8 @@
 from uuid import uuid4
+from datetime import datetime
+from math import ceil
+import re
+from time import monotonic
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -7,12 +11,33 @@ from starlette.exceptions import HTTPException
 
 
 class AppError(Exception):
-    def __init__(self, status: int, code: str, message: str, retryable: bool = False):
+    def __init__(self, status: int, code: str, message: str, retryable: bool = False,
+                 *, retry_after: str | None = None):
         self.status = status
         self.code = code
         self.message = message
         self.retryable = retryable
+        self._retry_deadline = None
+        self._retry_date = None
+        # 공급자 본문/임의 헤더는 전달하지 않고 검증된 대기 정보만 허용합니다.
+        if status == 503 and code == "AI_UNAVAILABLE" and isinstance(retry_after, str):
+            if re.fullmatch(r"[0-9]{1,6}", retry_after):
+                self._retry_deadline = monotonic() + int(retry_after)
+            elif re.fullmatch(r"[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT", retry_after):
+                try:
+                    datetime.strptime(retry_after, "%a, %d %b %Y %H:%M:%S GMT")
+                except ValueError:
+                    pass
+                else:
+                    self._retry_date = retry_after
         super().__init__(code)
+
+    @property
+    def retry_after(self) -> str | None:
+        # 같은 실패의 메모리 재응답이 대기 시간을 새로 시작하지 않게 합니다.
+        if self._retry_deadline is not None:
+            return str(max(0, ceil(self._retry_deadline - monotonic())))
+        return self._retry_date
 
 
 def error_response(request: Request, error: AppError) -> JSONResponse:
@@ -22,6 +47,7 @@ def error_response(request: Request, error: AppError) -> JSONResponse:
         content={"error": {"code": error.code, "message": error.message,
                            "retryable": error.retryable}, "request_id": request_id},
         headers={"X-Request-ID": request_id, "Cache-Control": "no-store",
+                 **({"Retry-After": error.retry_after} if error.retry_after is not None else {}),
                  **({"WWW-Authenticate": "Bearer"} if error.status == 401 else {})},
     )
 
